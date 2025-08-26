@@ -1,5 +1,6 @@
+flask==2.3.6
 pyTelegramBotAPI==4.12.0
-pandas
-numpy
-requests
-Flask
+requests==2.32.0
+numpy==1.27.6
+pandas==2.2.1
+gunicorn==21.2.0

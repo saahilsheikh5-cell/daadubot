@@ -4,12 +4,15 @@ import requests
 import pandas as pd
 import numpy as np
 import json
+import time
+import threading
 from flask import Flask, request
+from telebot import types
 
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = int(os.environ.get("CHAT_ID"))
-WEBHOOK_URL = f"https://solbot.onrender.com/{BOT_TOKEN}"  
+WEBHOOK_URL = f"https://solbot.onrender.com/{BOT_TOKEN}"
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_SECRET = os.environ.get("BINANCE_SECRET")
 KLINES_URL = "https://api.binance.com/api/v3/klines"
@@ -141,12 +144,26 @@ def send_signal_if_new(coin, interval, sig):
         last_signals[key] = now_ts
         save_json(LAST_SIGNAL_FILE,last_signals)
 
+# Auto signal scanner
+def signal_scanner():
+    while True:
+        active_coins = coins if coins else ["BTCUSDT","ETHUSDT","SOLUSDT"]
+        for c in active_coins:
+            intervals = coin_intervals.get(c, ["1m","5m","15m","1h","4h","1d"])
+            for interval in intervals:
+                sig = ultra_signal(c, interval)
+                if sig:
+                    send_signal_if_new(c, interval, sig)
+        time.sleep(60)
+
+threading.Thread(target=signal_scanner, daemon=True).start()
+
 # ================= USER STATE & MENUS =================
 user_state = {}
+selected_coin = {}
+selected_interval = {}
 
 # ----- MAIN MENU -----
-from telebot import types
-
 def main_menu(msg):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("➕ Add Coin","📊 My Coins")
@@ -183,11 +200,36 @@ def process_add_coin(msg):
     user_state[chat_id] = None
     main_menu(msg)
 
+@bot.message_handler(func=lambda m: m.text=="➖ Remove Coin")
+def remove_coin_menu(msg):
+    chat_id = msg.chat.id
+    if not coins:
+        bot.send_message(chat_id,"⚠️ No coins to remove.")
+        main_menu(msg)
+        return
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for c in coins:
+        markup.add(c)
+    markup.add("🔙 Back")
+    bot.send_message(chat_id,"Select coin to remove:", reply_markup=markup)
+    user_state[chat_id] = "removing_coin"
+
+@bot.message_handler(func=lambda m: user_state.get(m.chat.id)=="removing_coin")
+def process_remove_coin(msg):
+    chat_id = msg.chat.id
+    coin = msg.text.upper()
+    if coin in coins:
+        coins.remove(coin)
+        save_json(USER_COINS_FILE, coins)
+        bot.send_message(chat_id,f"✅ {coin} removed.")
+    else:
+        bot.send_message(chat_id,"❌ Coin not in list.")
+    user_state[chat_id] = None
+    main_menu(msg)
+
 # ---------------- FLASK WEBHOOK ------------------
 app = Flask(__name__)
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://your-render-url.com/<BOT_TOKEN>
 
-# Remove existing webhook and set new
 bot.remove_webhook()
 bot.set_webhook(url=WEBHOOK_URL)
 
@@ -201,6 +243,17 @@ def webhook():
 @app.route("/")
 def index():
     return "Bot is running!", 200
+
+# ================= HEALTH CHECK =================
+def health_check():
+    while True:
+        try:
+            requests.get(os.environ.get("HEALTH_URL","http://localhost:5000/"))
+        except:
+            pass
+        time.sleep(300)
+
+threading.Thread(target=health_check, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

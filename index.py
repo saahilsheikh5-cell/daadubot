@@ -11,13 +11,17 @@ from telebot import types
 
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = int(os.environ.get("CHAT_ID"))
-WEBHOOK_URL = f"https://solbot.onrender.com/{BOT_TOKEN}"
+CHAT_ID_ENV = os.environ.get("CHAT_ID")
+if CHAT_ID_ENV is None:
+    raise ValueError("CHAT_ID environment variable is missing!")
+CHAT_ID = int(CHAT_ID_ENV)
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://your-app.onrender.com/<BOT_TOKEN>
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_SECRET = os.environ.get("BINANCE_SECRET")
 KLINES_URL = "https://api.binance.com/api/v3/klines"
 
 bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
 # ================= STORAGE =================
 USER_COINS_FILE = "user_coins.json"
@@ -29,8 +33,11 @@ COIN_INTERVALS_FILE = "coin_intervals.json"
 def load_json(file, default):
     if not os.path.exists(file):
         return default
-    with open(file,"r") as f:
-        return json.load(f)
+    try:
+        with open(file,"r") as f:
+            return json.load(f)
+    except:
+        return default
 
 def save_json(file,data):
     with open(file,"w") as f:
@@ -96,19 +103,15 @@ def ultra_signal(symbol, interval):
     closes, volumes = get_klines(symbol, interval)
     if not closes or len(closes) < 26:
         return None
-
     last_close = closes[-1]
     last_vol = volumes[-1] if volumes else 0
-
     r_series = rsi(closes)
     if r_series.empty:
         return None
     r = r_series.iloc[-1]
-
     m, s = macd(closes)
     if len(m) == 0 or len(s) == 0:
         return None
-
     e_list = ema(closes, 20)
     if not e_list:
         return None
@@ -130,8 +133,7 @@ def ultra_signal(symbol, interval):
         return f"🟢 ULTRA STRONG BUY | {symbol} | {interval}\nEntry: {entry:.4f}\nSL: {sl:.4f}\nTP1: {tp1:.4f}\nTP2: {tp2:.4f}\nLeverage: {leverage}x\nConfidence: {confidence}"
     elif strong_sell:
         return f"🔴 ULTRA STRONG SELL | {symbol} | {interval}\nEntry: {entry:.4f}\nSL: {sl:.4f}\nTP1: {tp1:.4f}\nTP2: {tp2:.4f}\nLeverage: {leverage}x\nConfidence: {confidence}"
-    else:
-        return None
+    return None
 
 # ================= SIGNAL MANAGEMENT =================
 def send_signal_if_new(coin, interval, sig):
@@ -144,7 +146,6 @@ def send_signal_if_new(coin, interval, sig):
         last_signals[key] = now_ts
         save_json(LAST_SIGNAL_FILE,last_signals)
 
-# Auto signal scanner
 def signal_scanner():
     while True:
         active_coins = coins if coins else ["BTCUSDT","ETHUSDT","SOLUSDT"]
@@ -200,36 +201,7 @@ def process_add_coin(msg):
     user_state[chat_id] = None
     main_menu(msg)
 
-@bot.message_handler(func=lambda m: m.text=="➖ Remove Coin")
-def remove_coin_menu(msg):
-    chat_id = msg.chat.id
-    if not coins:
-        bot.send_message(chat_id,"⚠️ No coins to remove.")
-        main_menu(msg)
-        return
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for c in coins:
-        markup.add(c)
-    markup.add("🔙 Back")
-    bot.send_message(chat_id,"Select coin to remove:", reply_markup=markup)
-    user_state[chat_id] = "removing_coin"
-
-@bot.message_handler(func=lambda m: user_state.get(m.chat.id)=="removing_coin")
-def process_remove_coin(msg):
-    chat_id = msg.chat.id
-    coin = msg.text.upper()
-    if coin in coins:
-        coins.remove(coin)
-        save_json(USER_COINS_FILE, coins)
-        bot.send_message(chat_id,f"✅ {coin} removed.")
-    else:
-        bot.send_message(chat_id,"❌ Coin not in list.")
-    user_state[chat_id] = None
-    main_menu(msg)
-
 # ---------------- FLASK WEBHOOK ------------------
-app = Flask(__name__)
-
 bot.remove_webhook()
 bot.set_webhook(url=WEBHOOK_URL)
 
@@ -244,17 +216,20 @@ def webhook():
 def index():
     return "Bot is running!", 200
 
+@app.route("/health")
+def health():
+    return {"status": "ok"}, 200
+
 # ================= HEALTH CHECK =================
 def health_check():
     while True:
         try:
-            requests.get(os.environ.get("HEALTH_URL","http://localhost:5000/"))
+            requests.get(os.environ.get("HEALTH_URL", WEBHOOK_URL.replace(f"/{BOT_TOKEN}","")), timeout=5)
         except:
             pass
         time.sleep(300)
 
 threading.Thread(target=health_check, daemon=True).start()
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
+# ---------------- NO app.run() ------------------
+# Use gunicorn to run: gunicorn index:app --bind 0.0.0.0:$PORT --workers 2 --threads 2

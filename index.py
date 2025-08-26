@@ -9,6 +9,7 @@ from flask import Flask, request
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = int(os.environ.get("CHAT_ID"))
+WEBHOOK_URL = f"https://solbot.onrender.com/{BOT_TOKEN}"  
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_SECRET = os.environ.get("BINANCE_SECRET")
 KLINES_URL = "https://api.binance.com/api/v3/klines"

@@ -1,50 +1,45 @@
 import os
-from flask import Flask, request
 import telebot
+from flask import Flask, request
 
-# ---------------- CONFIG ----------------
+# ===== BOT CONFIG =====
 BOT_TOKEN = "7638935379:AAEmLD7JHLZ36Ywh5tvmlP1F8xzrcNrym_Q"
-WEBHOOK_URL_BASE = "https://daadubot.onrender.com"
-WEBHOOK_URL_PATH = f"/{BOT_TOKEN}"
-
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# ===== FLASK APP =====
 app = Flask(__name__)
 
-# ---------------- TELEGRAM COMMANDS ----------------
+# ===== TELEGRAM COMMANDS =====
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Hello! Bot is running successfully 🚀")
+    bot.send_message(message.chat.id, "Hello! Welcome to DaaduBot.\nUse /help to see commands.")
 
-# Example: add more commands here
 @bot.message_handler(commands=['help'])
 def send_help(message):
-    bot.reply_to(message, "This is your help message.")
+    help_text = "/start - Welcome message\n/help - This help message"
+    bot.send_message(message.chat.id, help_text)
 
-# ---------------- FLASK ROUTES ----------------
-@app.route("/")
-def index():
-    return "Bot server is running!"
-
-@app.route(WEBHOOK_URL_PATH, methods=['POST'])
+# ===== FLASK ROUTE FOR WEBHOOK =====
+@app.route(f"/{BOT_TOKEN}", methods=['POST'])
 def webhook():
     json_str = request.get_data().decode('utf-8')
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return "!", 200
+    return "OK", 200
 
-# ---------------- WEBHOOK SETUP ----------------
-def setup_webhook():
-    # Remove old webhook
-    bot.remove_webhook()
-    # Set new webhook
-    bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH)
-    print(f"Webhook set to {WEBHOOK_URL_BASE + WEBHOOK_URL_PATH}")
+# ===== ROOT =====
+@app.route("/", methods=['GET'])
+def index():
+    return "Bot is running!", 200
 
-# ---------------- RUN ON START ----------------
+# ===== MAIN =====
 if __name__ == "__main__":
-    setup_webhook()
-    # Only use Flask built-in server for local testing
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-else:
-    # If running with Gunicorn, set webhook once
-    setup_webhook()
+    # Detect environment
+    RUN_MODE = os.environ.get("RUN_MODE", "polling")  # default is polling
+
+    if RUN_MODE == "polling":
+        print("Starting bot in polling mode...")
+        bot.infinity_polling()
+    else:
+        print("Starting Flask server for webhook...")
+        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

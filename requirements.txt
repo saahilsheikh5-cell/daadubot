@@ -1,6 +1,15 @@
+# Telegram bot API
 pyTelegramBotAPI==4.14.0
+
+# Flask web framework
 Flask==2.3.2
+
+# WSGI server
 gunicorn==20.1.0
+
+# HTTP requests
 requests==2.30.0
+
+# Data handling
 numpy==1.26.4
 pandas==2.1.1

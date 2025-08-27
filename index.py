@@ -22,12 +22,10 @@ def webhook():
     bot.process_new_updates([update])
     return "!", 200
 
-# === Set webhook on startup ===
-@app.before_first_request
-def setup_webhook():
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL)
-    print(f"Webhook set: {WEBHOOK_URL}")
+# === Set webhook immediately ===
+bot.remove_webhook()
+bot.set_webhook(url=WEBHOOK_URL)
+print(f"Webhook set: {WEBHOOK_URL}")
 
 # === Optional root route ===
 @app.route("/")
@@ -35,4 +33,5 @@ def index():
     return "Bot service is live 🎉", 200
 
 if __name__ == "__main__":
+    # Direct run (for debugging)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

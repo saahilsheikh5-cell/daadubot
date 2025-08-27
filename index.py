@@ -1,50 +1,50 @@
 import os
-import logging
 from flask import Flask, request
 import telebot
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = "7638935379:AAEmLD7JHLZ36Ywh5tvmlP1F8xzrcNrym_Q"  # include your token
-WEBHOOK_PATH = f"/{BOT_TOKEN}"
-WEBHOOK_URL = f"https://daadubot.onrender.com{WEBHOOK_PATH}"
+BOT_TOKEN = "7638935379:AAEmLD7JHLZ36Ywh5tvmlP1F8xzrcNrym_Q"
+WEBHOOK_URL_BASE = "https://daadubot.onrender.com"
+WEBHOOK_URL_PATH = f"/{BOT_TOKEN}"
 
-# ---------------- INIT ----------------
-app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
-# Enable logging
-logging.basicConfig(level=logging.INFO)
-
-# ---------------- TELEGRAM HANDLERS ----------------
+# ---------------- TELEGRAM COMMANDS ----------------
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Hello! Your bot is live and working.")
+    bot.reply_to(message, "Hello! Bot is running successfully 🚀")
 
-@bot.message_handler(func=lambda message: True)
-def echo_all(message):
-    bot.reply_to(message, f"You said: {message.text}")
+# Example: add more commands here
+@bot.message_handler(commands=['help'])
+def send_help(message):
+    bot.reply_to(message, "This is your help message.")
 
-# ---------------- FLASK ROUTE ----------------
-@app.route(WEBHOOK_PATH, methods=['POST'])
+# ---------------- FLASK ROUTES ----------------
+@app.route("/")
+def index():
+    return "Bot server is running!"
+
+@app.route(WEBHOOK_URL_PATH, methods=['POST'])
 def webhook():
     json_str = request.get_data().decode('utf-8')
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return "OK", 200
+    return "!", 200
 
-@app.route("/", methods=['GET'])
-def index():
-    return "Bot is running!", 200
-
-# ---------------- SET WEBHOOK ----------------
+# ---------------- WEBHOOK SETUP ----------------
 def setup_webhook():
-    if bot.get_webhook_info().url != WEBHOOK_URL:
-        bot.remove_webhook()
-        bot.set_webhook(url=WEBHOOK_URL)
-        logging.info(f"Webhook set to {WEBHOOK_URL}")
+    # Remove old webhook
+    bot.remove_webhook()
+    # Set new webhook
+    bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH)
+    print(f"Webhook set to {WEBHOOK_URL_BASE + WEBHOOK_URL_PATH}")
 
-# ---------------- MAIN ----------------
+# ---------------- RUN ON START ----------------
 if __name__ == "__main__":
     setup_webhook()
-    # Run Flask in default mode for local testing
+    # Only use Flask built-in server for local testing
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+else:
+    # If running with Gunicorn, set webhook once
+    setup_webhook()

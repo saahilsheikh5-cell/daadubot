@@ -1,138 +1,161 @@
 import os
-import time
-import threading
-import requests
 import telebot
+import requests
+import pandas as pd
+import numpy as np
 from flask import Flask, request
 from telebot import types
 
-# ===== CONFIG =====
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-BINANCE_KEY = os.environ.get("BINANCE_KEY")
-BINANCE_SECRET = os.environ.get("BINANCE_SECRET")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://yourrenderapp.onrender.com
+# =========================
+# CONFIG
+# =========================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN not set in environment variables!")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# In-memory storage (replace with DB if needed)
+RENDER_URL = "https://daadubot.onrender.com"
+
+# =========================
+# COIN STORAGE
+# =========================
 user_coins = {}
-timeframes = ["1m", "5m", "15m", "1h", "4h", "1d"]
 
-# ===== FLASK ROUTES =====
-@app.route("/", methods=["GET"])
-def health():
-    return "Bot service is live!", 200
+# =========================
+# HELPER: TECHNICAL SIGNALS
+# =========================
+def get_signal(prices):
+    if len(prices) < 14:
+        return "Neutral"
 
-@app.route("/" + BOT_TOKEN, methods=["POST"])
-def webhook():
-    json_str = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "", 200
+    sma = np.mean(prices[-14:])
+    last = prices[-1]
 
-# ===== TELEGRAM HANDLERS =====
-@bot.message_handler(commands=["start", "help"])
-def start_handler(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("My Coins", "Add Coin", "Remove Coin")
-    markup.row("Auto Signals", "Top Movers", "Technical Analysis")
-    bot.send_message(message.chat.id, "Welcome! Choose an option:", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.text == "My Coins")
-def my_coins(message):
-    chat_id = message.chat.id
-    coins = user_coins.get(chat_id, [])
-    if not coins:
-        bot.send_message(chat_id, "You have no coins added yet.")
-        return
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for coin in coins:
-        markup.add(coin)
-    markup.add("Back")
-    bot.send_message(chat_id, "Select a coin for analysis:", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.text == "Add Coin")
-def add_coin(message):
-    msg = bot.send_message(message.chat.id, "Send the coin symbol to add (e.g., BTCUSDT):")
-    bot.register_next_step_handler(msg, add_coin_step)
-
-def add_coin_step(message):
-    chat_id = message.chat.id
-    coin = message.text.upper()
-    user_coins.setdefault(chat_id, []).append(coin)
-    bot.send_message(chat_id, f"{coin} added!")
-
-@bot.message_handler(func=lambda m: m.text == "Remove Coin")
-def remove_coin(message):
-    chat_id = message.chat.id
-    coins = user_coins.get(chat_id, [])
-    if not coins:
-        bot.send_message(chat_id, "You have no coins to remove.")
-        return
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for coin in coins:
-        markup.add(coin)
-    msg = bot.send_message(chat_id, "Select a coin to remove:", reply_markup=markup)
-    bot.register_next_step_handler(msg, remove_coin_step)
-
-def remove_coin_step(message):
-    chat_id = message.chat.id
-    coin = message.text.upper()
-    coins = user_coins.get(chat_id, [])
-    if coin in coins:
-        coins.remove(coin)
-        bot.send_message(chat_id, f"{coin} removed!")
+    if last > sma * 1.03:
+        return "Ultra Buy ✅"
+    elif last > sma * 1.01:
+        return "Strong Buy 🟢"
+    elif last > sma:
+        return "Buy 🔼"
+    elif last < sma * 0.97:
+        return "Ultra Sell ❌"
+    elif last < sma * 0.99:
+        return "Strong Sell 🔴"
+    elif last < sma:
+        return "Sell 🔽"
     else:
-        bot.send_message(chat_id, f"{coin} not found in your list.")
+        return "Neutral ⚪"
 
-@bot.message_handler(func=lambda m: m.text == "Technical Analysis")
-def technical_analysis(message):
-    chat_id = message.chat.id
-    coins = user_coins.get(chat_id, [])
+def get_technical_analysis(symbol, timeframe="1h"):
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}USDT&interval={timeframe}&limit=50"
+        data = requests.get(url, timeout=10).json()
+        closes = [float(c[4]) for c in data]
+        signal = get_signal(closes)
+        return f"{symbol.upper()} ({timeframe}) → {signal}"
+    except Exception as e:
+        return f"Error fetching {symbol} ({timeframe}): {e}"
+
+# =========================
+# MENU HANDLERS
+# =========================
+@bot.message_handler(commands=["start"])
+def start(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row("➕ Add Coin", "📂 My Coins")
+    markup.row("📊 Technical Analysis", "🚀 Movers")
+    markup.row("⚡ Auto Signals", "🔧 Settings")
+    bot.send_message(message.chat.id, "👋 Welcome to DaaduBot! Select an option:", reply_markup=markup)
+
+@bot.message_handler(func=lambda msg: msg.text == "➕ Add Coin")
+def add_coin(message):
+    bot.send_message(message.chat.id, "Send me the coin symbol (e.g., BTC, ETH):")
+    bot.register_next_step_handler(message, save_coin)
+
+def save_coin(message):
+    coin = message.text.strip().upper()
+    user_coins.setdefault(message.chat.id, []).append(coin)
+    bot.send_message(message.chat.id, f"✅ {coin} added to your list.")
+
+@bot.message_handler(func=lambda msg: msg.text == "📂 My Coins")
+def my_coins(message):
+    coins = user_coins.get(message.chat.id, [])
     if not coins:
-        bot.send_message(chat_id, "Add coins first.")
+        bot.send_message(message.chat.id, "You have no coins added yet.")
         return
+
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for coin in coins:
-        markup.add(coin)
-    markup.add("Back")
-    msg = bot.send_message(chat_id, "Select a coin for technical analysis:", reply_markup=markup)
-    bot.register_next_step_handler(msg, analysis_coin_step)
+        markup.row(coin)
+    markup.row("⬅️ Back")
+    bot.send_message(message.chat.id, "📂 Your coins:", reply_markup=markup)
 
-def analysis_coin_step(message):
-    coin = message.text.upper()
-    chat_id = message.chat.id
-    for tf in timeframes:
-        # Placeholder for actual analysis (replace with Binance API logic)
-        signal = f"{coin} - {tf}: Neutral"
-        bot.send_message(chat_id, signal)
+@bot.message_handler(func=lambda msg: msg.text in user_coins.get(msg.chat.id, []))
+def coin_analysis(message):
+    coin = message.text
+    timeframes = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    response = [get_technical_analysis(coin, tf) for tf in timeframes]
+    bot.send_message(message.chat.id, "\n".join(response))
 
-@bot.message_handler(func=lambda m: m.text == "Top Movers")
-def top_movers(message):
-    chat_id = message.chat.id
-    # Placeholder for top movers logic
-    bot.send_message(chat_id, "Top Movers: BTC, ETH, SOL")
+@bot.message_handler(func=lambda msg: msg.text == "📊 Technical Analysis")
+def tech_analysis(message):
+    bot.send_message(message.chat.id, "Send me the coin symbol for analysis:")
+    bot.register_next_step_handler(message, tech_analysis_run)
 
-@bot.message_handler(func=lambda m: m.text == "Auto Signals")
+def tech_analysis_run(message):
+    coin = message.text.strip().upper()
+    timeframes = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    response = [get_technical_analysis(coin, tf) for tf in timeframes]
+    bot.send_message(message.chat.id, "\n".join(response))
+
+@bot.message_handler(func=lambda msg: msg.text == "🚀 Movers")
+def movers(message):
+    try:
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        data = requests.get(url, timeout=10).json()
+        usdt_pairs = [x for x in data if x["symbol"].endswith("USDT")]
+        movers = sorted(usdt_pairs, key=lambda x: float(x["priceChangePercent"]), reverse=True)[:5]
+
+        response = "🚀 Top 5 Movers (24h):\n"
+        for m in movers:
+            response += f"{m['symbol']}: {m['priceChangePercent']}%\n"
+        bot.send_message(message.chat.id, response)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Error fetching movers: {e}")
+
+@bot.message_handler(func=lambda msg: msg.text == "⚡ Auto Signals")
 def auto_signals(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "Auto Signals started. You will receive updates automatically.")
-    threading.Thread(target=send_auto_signals, args=(chat_id,), daemon=True).start()
+    bot.send_message(message.chat.id, "⚡ Auto signals will scan your coins soon... (feature placeholder).")
 
-def send_auto_signals(chat_id):
-    while True:
-        # Placeholder logic for auto signals (replace with real API logic)
-        for coin in user_coins.get(chat_id, []):
-            bot.send_message(chat_id, f"Auto Signal for {coin}: BUY")
-        time.sleep(60)
+@bot.message_handler(func=lambda msg: msg.text == "⬅️ Back")
+def go_back(message):
+    start(message)
 
-# ===== START BOT WITH WEBHOOK =====
-def set_webhook():
-    url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
-    bot.remove_webhook()
-    bot.set_webhook(url=url)
+# =========================
+# FLASK ROUTES (WEBHOOK)
+# =========================
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    update = request.stream.read().decode("utf-8")
+    bot.process_new_updates([telebot.types.Update.de_json(update)])
+    return "OK", 200
 
+@app.route("/health", methods=["GET"])
+def health():
+    return "Bot is alive ✅", 200
+
+# =========================
+# AUTO SET WEBHOOK
+# =========================
+with app.app_context():
+    wh_url = f"{RENDER_URL}/{BOT_TOKEN}"
+    r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={wh_url}")
+    print("Webhook set:", r.json())
+
+# =========================
+# MAIN ENTRY
+# =========================
 if __name__ == "__main__":
-    set_webhook()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))

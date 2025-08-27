@@ -1,6 +1,5 @@
-pyTelegramBotAPI==4.15.4
-Flask==3.0.3
+pyTelegramBotAPI==4.12.0
+Flask==3.0.2
 gunicorn==20.1.0
+tradingview_ta==3.3.0
 requests==2.31.0
-pandas==2.2.2
-numpy==1.26.4

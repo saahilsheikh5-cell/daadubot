@@ -8,12 +8,12 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "https://daadubot.onrender.com")
-WEBHOOK_PATH = f"/{BOT_TOKEN}"
+WEBHOOK_PATH = f"/{BOT_TOKEN}"  # include bot token in path
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# ======= COMMANDS =======
+# COMMANDS
 @bot.message_handler(commands=["start","help"])
 def start(message):
     bot.send_message(message.chat.id, "✅ Bot is live and ready!")
@@ -22,7 +22,7 @@ def start(message):
     markup.add("➖ Remove Coin","📈 Top Movers")
     bot.send_message(message.chat.id,"🤖 Main Menu:", reply_markup=markup)
 
-# ======= FLASK ROUTES =======
+# FLASK ROUTES
 @app.route("/", methods=["GET"])
 def healthcheck():
     return "Bot is alive ✅", 200
@@ -34,7 +34,7 @@ def webhook():
     bot.process_new_updates([update])
     return "ok", 200
 
-# ======= SETUP WEBHOOK =======
+# WEBHOOK SETUP
 def setup_webhook():
     import requests
     requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
@@ -42,8 +42,6 @@ def setup_webhook():
     r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={url}")
     logger.info(f"Webhook set: {r.json()}")
 
-# ======= MAIN =======
 if __name__ == "__main__":
     setup_webhook()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-

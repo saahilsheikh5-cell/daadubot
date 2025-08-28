@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 # ===== CONFIG =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN is not set in environment!")
+
 WEBHOOK_URL_PATH = "/webhook"
 PUBLIC_URL = os.getenv("PUBLIC_URL", "https://daadubot.onrender.com")
 
@@ -20,7 +23,10 @@ app = Flask(__name__)
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
     logger.info(f"Handling /start from chat {message.chat.id}")
-    bot.reply_to(message, "✅ Bot is live and working on Render!")
+    try:
+        bot.send_message(message.chat.id, "✅ Bot is live and working on Render!")
+    except Exception as e:
+        logger.error(f"Failed to send message: {e}")
 
 # ===== ROUTES =====
 @app.route("/", methods=["GET"])
@@ -31,10 +37,11 @@ def home():
 @app.route(WEBHOOK_URL_PATH, methods=["POST"])
 def webhook():
     update = request.get_json(force=True)
-    logger.info(f"Incoming update: {update}")
+    logger.info(f"Incoming update: {update}")   # log every incoming update
     if update:
         try:
-            bot.process_new_updates([telebot.types.Update.de_json(update)])
+            upd = telebot.types.Update.de_json(update)
+            bot.process_new_updates([upd])
         except Exception as e:
             logger.error(f"Error while processing update: {e}")
     return "ok", 200
@@ -51,4 +58,7 @@ def setup_webhook():
 if __name__ == "__main__":
     setup_webhook()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+else:
+    setup_webhook()
+
 

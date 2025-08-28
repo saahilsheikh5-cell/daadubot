@@ -1,4 +1,3 @@
-import os
 from flask import Flask, request
 import logging
 import requests
@@ -53,13 +52,5 @@ def setup_webhook():
     requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
     url = f"{PUBLIC_URL}{WEBHOOK_URL_PATH}"
     r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={url}")
-    logger.info(f"Webhook set response: {r.json()}")
-
-# ===== MAIN =====
-if __name__ == "__main__":
-    setup_webhook()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-else:
-    setup_webhook()
-
+    logger.info(
 

@@ -1,247 +1,470 @@
 import os
-import json
+import sqlite3
+import threading
+import time
+import math
 import requests
-import pandas as pd
 import numpy as np
+import pandas as pd
 from flask import Flask, request
 import telebot
-from telebot import types
-from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
 
-API_KEY = os.getenv("TELEGRAM_API_KEY")
-bot = telebot.TeleBot(API_KEY)
+# ------------------------
+# ENV
+# ------------------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN not found in environment variables!")
+
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+BINANCE_SECRET = os.getenv("BINANCE_SECRET")
+
+bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-COINS_FILE = "coins.json"
+# ------------------------
+# DB
+# ------------------------
+DB_FILE = "settings.db"
 
-# ---------- Utility: persistent coin storage ----------
-def load_coins():
-    if not os.path.exists(COINS_FILE):
-        return []
-    with open(COINS_FILE, "r") as f:
-        try:
-            return json.load(f)
-        except:
-            return []
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        coin TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        interval_seconds INTEGER NOT NULL DEFAULT 60,
+        score_threshold INTEGER NOT NULL DEFAULT 70
+    )
+    """)
+    conn.commit()
+    conn.close()
 
-def save_coins(coins):
-    with open(COINS_FILE, "w") as f:
-        json.dump(coins, f)
+init_db()
 
-# ---------- Binance Kline Fetch ----------
-def get_klines(symbol, interval, limit=100):
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    r = requests.get(url)
-    data = r.json()
+# ------------------------
+# Scheduler
+# ------------------------
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+lock = threading.Lock()
+
+# ------------------------
+# Binance klines helper
+# ------------------------
+def fetch_klines(symbol, interval, limit=300):
+    # Binance public API
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
     df = pd.DataFrame(data, columns=[
-        "time","o","h","l","c","v","ct","qv","tn","tb","tq","ig"
+        "open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base_vol","taker_quote_vol","ignore"
     ])
-    df["c"] = df["c"].astype(float)
-    df["h"] = df["h"].astype(float)
-    df["l"] = df["l"].astype(float)
-    df["o"] = df["o"].astype(float)
-    df["v"] = df["v"].astype(float)
+    df["close"] = df["close"].astype(float)
+    df["open"] = df["open"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+    df["volume"] = df["volume"].astype(float)
     return df
 
-# ---------- Indicators ----------
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(period).mean()
-    avg_loss = pd.Series(loss).rolling(period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+# ------------------------
+# Technicals & scoring
+# ------------------------
+def compute_indicators(df):
+    close = df["close"]
 
-def ema(series, period=20):
-    return series.ewm(span=period).mean()
+    # RSI (14)
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    ma_up = up.rolling(14).mean()
+    ma_down = down.rolling(14).mean()
+    rs = ma_up / ma_down
+    rsi = 100 - (100 / (1 + rs))
 
-def macd(series, fast=12, slow=26, signal=9):
-    fast_ema = series.ewm(span=fast).mean()
-    slow_ema = series.ewm(span=slow).mean()
-    macd_line = fast_ema - slow_ema
-    signal_line = macd_line.ewm(span=signal).mean()
-    return macd_line, signal_line
+    # EMA
+    ema_fast = close.ewm(span=12, adjust=False).mean()
+    ema_slow = close.ewm(span=26, adjust=False).mean()
 
-def atr(df, period=14):
-    high_low = df["h"] - df["l"]
-    high_close = np.abs(df["h"] - df["c"].shift())
-    low_close = np.abs(df["l"] - df["c"].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    return true_range.rolling(period).mean()
+    # MACD
+    macd = ema_fast - ema_slow
+    macd_sig = macd.ewm(span=9, adjust=False).mean()
+    macd_hist = macd - macd_sig
 
-# ---------- Analysis ----------
-def analyze(symbol, interval):
+    # ATR (14)
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - close.shift()).abs()
+    low_close = (df["low"] - close.shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+
+    # Bollinger Bands (20,2)
+    ma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    upper_bb = ma20 + 2 * std20
+    lower_bb = ma20 - 2 * std20
+
+    # Stochastic (14,3)
+    lowest14 = df["low"].rolling(14).min()
+    highest14 = df["high"].rolling(14).max()
+    stoch_k = 100 * (close - lowest14) / (highest14 - lowest14)
+    stoch_d = stoch_k.rolling(3).mean()
+
+    # Volume
+    vol20 = df["volume"].rolling(20).mean()
+
+    return {
+        "close": close,
+        "rsi": rsi,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "macd_hist": macd_hist,
+        "atr": atr,
+        "upper_bb": upper_bb,
+        "lower_bb": lower_bb,
+        "stoch_k": stoch_k,
+        "stoch_d": stoch_d,
+        "vol20": vol20
+    }
+
+def score_signal(latest, inds):
+    # latest: index (int) for last candle
+    s = 0
+
+    rsi = inds["rsi"].iloc[latest]
+    macd_h = inds["macd_hist"].iloc[latest]
+    ema_fast = inds["ema_fast"].iloc[latest]
+    ema_slow = inds["ema_slow"].iloc[latest]
+    close = inds["close"].iloc[latest]
+    upper_bb = inds["upper_bb"].iloc[latest]
+    lower_bb = inds["lower_bb"].iloc[latest]
+    stoch_k = inds["stoch_k"].iloc[latest]
+    stoch_d = inds["stoch_d"].iloc[latest]
+    vol = inds["vol20"].iloc[latest]
+    cur_vol = inds["close"].index  # not used, we use df volume separately in caller
+
+    # RSI signal weight
+    if rsi < 20:
+        s += 25  # very strong buy
+    elif rsi < 30:
+        s += 15
+    elif rsi > 80:
+        s -= 20  # strong sell
+    elif rsi > 70:
+        s -= 10
+
+    # EMA crossover
+    if ema_fast > ema_slow:
+        s += 15
+    else:
+        s -= 10
+
+    # MACD histogram
+    if macd_h > 0:
+        s += min(15, (macd_h / (abs(macd_h) + 1)) * 15)
+    else:
+        s -= min(15, (abs(macd_h) / (abs(macd_h) + 1)) * 15)
+
+    # Bollinger breakout
+    if close > upper_bb:
+        s += 8
+    elif close < lower_bb:
+        s += 8
+
+    # Stochastic (oversold/overbought)
+    if stoch_k < 20 and stoch_d < 20:
+        s += 8
+    elif stoch_k > 80 and stoch_d > 80:
+        s -= 8
+
+    # Normalize to 0-100
+    s = max(-100, min(100, s))
+    final = (s + 100) / 2  # map -100..100 to 0..100
+    return round(final)
+
+# ------------------------
+# Trade plan generator
+# ------------------------
+def suggest_trade_from_inds(df, inds, latest_index, rscore):
+    price = inds["close"].iloc[latest_index]
+    atr = inds["atr"].iloc[latest_index]
+
+    # direction by score >50 => buy bias, <50 sell bias
+    direction = "BUY" if rscore >= 50 else "SELL"
+
+    # suggested leverage (conservative depending on score)
+    if rscore >= 85:
+        lev = 20
+    elif rscore >= 70:
+        lev = 10
+    elif rscore >= 55:
+        lev = 5
+    else:
+        lev = 2
+
+    # SL/TP using ATR multiples
+    if direction == "BUY":
+        sl = round(price - 1.5 * atr, 4)
+        tp1 = round(price + 2 * atr, 4)
+        tp2 = round(price + 3.5 * atr, 4)
+    else:
+        sl = round(price + 1.5 * atr, 4)
+        tp1 = round(price - 2 * atr, 4)
+        tp2 = round(price - 3.5 * atr, 4)
+
+    return {
+        "direction": direction,
+        "price": round(price, 8),
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "leverage": lev
+    }
+
+# ------------------------
+# Job runner for subscription
+# ------------------------
+def subscription_job(sub_id):
+    with lock:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT id, chat_id, coin, timeframe, interval_seconds, score_threshold FROM subscriptions WHERE id=?", (sub_id,))
+        row = cur.fetchone()
+        conn.close()
+
+    if not row:
+        return
+
+    _, chat_id, coin, timeframe, interval_seconds, threshold = row
+
     try:
-        df = get_klines(symbol, interval, 100)
-        price = df["c"].iloc[-1]
-        rsi_val = rsi(df["c"]).iloc[-1]
-        ema20 = ema(df["c"], 20).iloc[-1]
-        ema50 = ema(df["c"], 50).iloc[-1]
-        macd_line, signal_line = macd(df["c"])
-        macd_val = macd_line.iloc[-1]
-        signal_val = signal_line.iloc[-1]
-        atr_val = atr(df).iloc[-1]
-        vol = df["v"].iloc[-1]
+        df = fetch_klines(coin, timeframe, limit=300)
+        inds = compute_indicators(df)
+        latest = len(df) - 1
+        score = score_signal(latest, inds)
 
-        # Action logic
-        action = "⚠️ Hold"
-        entry = price
-        sl = None
-        tp1 = None
-        tp2 = None
-        leverage = "5x-10x"
+        # only send "ultra" signals above threshold
+        if score >= threshold:
+            trade = suggest_trade_from_inds(df, inds, latest, score)
 
-        if rsi_val < 30 and macd_val > signal_val and ema20 > ema50:
-            action = "✅ Long"
-            sl = round(price - 2 * atr_val, 4)
-            tp1 = round(price + 2 * atr_val, 4)
-            tp2 = round(price + 4 * atr_val, 4)
-            leverage = "10x-20x"
-        elif rsi_val > 70 and macd_val < signal_val and ema20 < ema50:
-            action = "🔻 Short"
-            sl = round(price + 2 * atr_val, 4)
-            tp1 = round(price - 2 * atr_val, 4)
-            tp2 = round(price - 4 * atr_val, 4)
-            leverage = "10x-20x"
+            # step messages
+            bot.send_message(chat_id, f"📌 {coin} | {timeframe} | Score: {score}%\nPrice: {trade['price']}\nBias: {trade['direction']}")
+            bot.send_message(chat_id, f"RSI: {inds['rsi'].iloc[latest]:.2f} | EMA_fast: {inds['ema_fast'].iloc[latest]:.4f} | EMA_slow: {inds['ema_slow'].iloc[latest]:.4f}")
+            bot.send_message(chat_id, f"MACD hist: {inds['macd_hist'].iloc[latest]:.6f} | ATR: {inds['atr'].iloc[latest]:.6f}")
+            bot.send_message(chat_id, f"Volume vs MA20: {df['volume'].iloc[latest]:.2f} vs {inds['vol20'].iloc[latest]:.2f}")
+            bot.send_message(chat_id, f"🎯 Trade Plan\nEntry: {trade['price']}\nSL: {trade['sl']}\nTP1: {trade['tp1']}\nTP2: {trade['tp2']}\nSuggested Leverage: x{trade['leverage']}")
 
-        msg = f"""📊 {symbol} | {interval}
-Price: {price:.4f}
-RSI(14): {rsi_val:.2f}
-EMA20/50: {"Bullish" if ema20>ema50 else "Bearish"}  (20={ema20:.4f}, 50={ema50:.4f})
-MACD: {"Bullish" if macd_val>signal_val else "Bearish"}  (MACD={macd_val:.5f}, Signal={signal_val:.5f})
-ATR(14): {atr_val:.6f}
-Vol(last): {vol:.2f}
-
-🎯 Action: {action}
-Entry: {entry:.4f}
-Stop Loss: {sl}
-TP1: {tp1}
-TP2: {tp2}
-Leverage: {leverage}
-"""
-        return msg
     except Exception as e:
-        return f"❌ Error analyzing {symbol}: {e}"
+        print("subscription job error:", e)
 
-# ---------- Bot Handlers ----------
-def main_menu(chat_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("➕ Add Coin", "➖ Remove Coin")
-    markup.add("📊 My Coins", "📈 Top Movers")
-    markup.add("📡 Signals", "⚙️ Signal Settings")
-    markup.add("♻️ Reset Settings")
-    bot.send_message(chat_id, "Main Menu:", reply_markup=markup)
+# ------------------------
+# Utility: schedule all jobs from DB
+# ------------------------
+def schedule_all_subscriptions():
+    with lock:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT id, interval_seconds FROM subscriptions")
+        rows = cur.fetchall()
+        conn.close()
 
-@bot.message_handler(commands=["start"])
-def start(message):
-    bot.send_message(message.chat.id, "✅ Bot is live and working on Render!")
-    main_menu(message.chat.id)
+    # remove existing jobs not in DB
+    existing = set(j.id for j in scheduler.get_jobs())
+    db_ids = set(str(r[0]) for r in rows)
 
-@bot.message_handler(func=lambda msg: True)
-def handle_message(message):
-    text = message.text
-    chat_id = message.chat.id
-    coins = load_coins()
+    for job_id in existing:
+        if job_id not in db_ids:
+            try:
+                scheduler.remove_job(job_id)
+            except Exception:
+                pass
 
-    # ---- Menu Handling ----
-    if text == "➕ Add Coin":
-        msg = bot.send_message(chat_id, "Send symbol (e.g. BTCUSDT):")
-        bot.register_next_step_handler(msg, add_coin)
-    elif text == "➖ Remove Coin":
-        if not coins:
-            bot.send_message(chat_id, "⚠️ No coins added.")
-            return
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        for c in coins: markup.add(c)
-        msg = bot.send_message(chat_id, "Choose coin to remove:", reply_markup=markup)
-        bot.register_next_step_handler(msg, remove_coin)
-    elif text == "📊 My Coins":
-        if not coins:
-            bot.send_message(chat_id, "⚠️ No coins added.")
+    for r in rows:
+        sub_id, interval_seconds = r
+        job_id = str(sub_id)
+        if job_id in existing:
+            continue
+        scheduler.add_job(subscription_job, 'interval', seconds=interval_seconds, args=[sub_id], id=job_id, replace_existing=True)
+
+# Run scheduler initial load
+schedule_all_subscriptions()
+
+# ------------------------
+# Bot commands (add, setinterval, mycoins, stop, reset)
+# ------------------------
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    bot.reply_to(message, "Welcome — use /add COIN TIMEFRAME [interval_seconds] to subscribe. Example: /add BTCUSDT 15m 300\nUse /setinterval COIN TIMEFRAME SECONDS to change per-subscription interval.\nUltra signals only sent if score >= threshold (default 70). Use /setthreshold COIN TIMEFRAME 80 to change.)")
+
+@bot.message_handler(commands=['add'])
+def add_cmd(message):
+    try:
+        parts = message.text.split()
+        coin = parts[1].upper()
+        timeframe = parts[2]
+        interval_seconds = int(parts[3]) if len(parts) > 3 else 60
+        chat_id = str(message.chat.id)
+
+        with lock:
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("INSERT INTO subscriptions (chat_id, coin, timeframe, interval_seconds) VALUES (?,?,?,?)", (chat_id, coin, timeframe, interval_seconds))
+            sub_id = cur.lastrowid
+            conn.commit()
+            conn.close()
+
+        # schedule job
+        scheduler.add_job(subscription_job, 'interval', seconds=interval_seconds, args=[sub_id], id=str(sub_id), replace_existing=True)
+
+        bot.reply_to(message, f"✅ Subscribed {coin} {timeframe} every {interval_seconds}s (id={sub_id}).")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Usage: /add COIN TIMEFRAME [interval_seconds]\nExample: /add BTCUSDT 15m 300\nError: {e}")
+
+@bot.message_handler(commands=['setinterval'])
+def set_interval_cmd(message):
+    try:
+        parts = message.text.split()
+        coin = parts[1].upper()
+        timeframe = parts[2]
+        interval_seconds = int(parts[3])
+        chat_id = str(message.chat.id)
+
+        with lock:
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("UPDATE subscriptions SET interval_seconds=? WHERE chat_id=? AND coin=? AND timeframe=?", (interval_seconds, chat_id, coin, timeframe))
+            conn.commit()
+            cur.execute("SELECT id FROM subscriptions WHERE chat_id=? AND coin=? AND timeframe=?", (chat_id, coin, timeframe))
+            row = cur.fetchone()
+            conn.close()
+
+        if row:
+            sub_id = row[0]
+            scheduler.add_job(subscription_job, 'interval', seconds=interval_seconds, args=[sub_id], id=str(sub_id), replace_existing=True)
+            bot.reply_to(message, f"✅ Interval updated for {coin} {timeframe} -> {interval_seconds}s")
         else:
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            for c in coins: markup.add(c)
-            msg = bot.send_message(chat_id, "Select coin:", reply_markup=markup)
-            bot.register_next_step_handler(msg, show_timeframes)
-    elif text == "📈 Top Movers":
-        bot.send_message(chat_id, "🚀 Feature under dev: Top movers list here.")
-    elif text == "📡 Signals":
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("📊 My Coins Signals", "📈 All Coins Signals", "🔎 Any Coin")
-        bot.send_message(chat_id, "Choose signal type:", reply_markup=markup)
-    elif text == "📊 My Coins Signals":
-        bot.send_message(chat_id, "📡 Signals started for your coins...")
-        # Future: add scheduling loop
-    elif text == "📈 All Coins Signals":
-        bot.send_message(chat_id, "📡 Signals started for Binance top coins...")
-    elif text == "🔎 Any Coin":
-        msg = bot.send_message(chat_id, "Send coin symbol (e.g. ETHUSDT):")
-        bot.register_next_step_handler(msg, any_coin)
-    elif text == "⚙️ Signal Settings":
-        bot.send_message(chat_id, "Current Settings\nRSI Buy: 30\nRSI Sell: 70\nValidity: 15 min\nActive subscription: all | - | 1m")
-    elif text == "♻️ Reset Settings":
-        save_coins([])
-        bot.send_message(chat_id, "✅ All settings reset.")
-    else:
-        bot.send_message(chat_id, f"You said: {text}")
+            bot.reply_to(message, "❌ Subscription not found.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Usage: /setinterval COIN TIMEFRAME SECONDS\nError: {e}")
 
-def add_coin(message):
-    coin = message.text.upper()
-    coins = load_coins()
-    if coin not in coins:
-        coins.append(coin)
-        save_coins(coins)
-        bot.send_message(message.chat.id, f"✅ {coin} added.")
-    else:
-        bot.send_message(message.chat.id, f"{coin} already exists.")
+@bot.message_handler(commands=['setthreshold'])
+def set_threshold_cmd(message):
+    try:
+        parts = message.text.split()
+        coin = parts[1].upper()
+        timeframe = parts[2]
+        threshold = int(parts[3])
+        chat_id = str(message.chat.id)
 
-def remove_coin(message):
-    coin = message.text.upper()
-    coins = load_coins()
-    if coin in coins:
-        coins.remove(coin)
-        save_coins(coins)
-        bot.send_message(message.chat.id, f"❌ {coin} removed.")
-    else:
-        bot.send_message(message.chat.id, f"{coin} not found.")
+        with lock:
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("UPDATE subscriptions SET score_threshold=? WHERE chat_id=? AND coin=? AND timeframe=?", (threshold, chat_id, coin, timeframe))
+            conn.commit()
+            conn.close()
 
-def show_timeframes(message):
-    coin = message.text.upper()
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for tf in ["1m","5m","15m","1h","4h","1d"]:
-        markup.add(tf)
-    msg = bot.send_message(message.chat.id, f"Select timeframe for {coin}:", reply_markup=markup)
-    bot.register_next_step_handler(msg, lambda m: show_analysis(m, coin))
+        bot.reply_to(message, f"✅ Threshold set to {threshold}% for {coin} {timeframe}.")
+    except Exception as e:
+        bot.reply_to(message, "❌ Usage: /setthreshold COIN TIMEFRAME PERCENT")
 
-def show_analysis(message, coin):
-    tf = message.text
-    result = analyze(coin, tf)
-    bot.send_message(message.chat.id, result)
+@bot.message_handler(commands=['mycoins'])
+def mycoins_cmd(message):
+    chat_id = str(message.chat.id)
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT coin, timeframe, interval_seconds, score_threshold FROM subscriptions WHERE chat_id=?", (chat_id,))
+    rows = cur.fetchall()
+    conn.close()
 
-def any_coin(message):
-    coin = message.text.upper()
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for tf in ["1m","5m","15m","1h","4h","1d"]:
-        markup.add(tf)
-    msg = bot.send_message(message.chat.id, f"Select timeframe for {coin}:", reply_markup=markup)
-    bot.register_next_step_handler(msg, lambda m: show_analysis(m, coin))
+    if not rows:
+        bot.reply_to(message, "No active subscriptions.")
+        return
 
-# ---------- Flask webhook ----------
-@app.route("/" + API_KEY, methods=["POST"])
+    msg = "Your subscriptions:\n"
+    for r in rows:
+        msg += f"{r[0]} {r[1]} | every {r[2]}s | threshold {r[3]}%\n"
+    bot.reply_to(message, msg)
+
+@bot.message_handler(commands=['stop'])
+def stop_cmd(message):
+    try:
+        parts = message.text.split()
+        coin = parts[1].upper()
+        timeframe = parts[2]
+        chat_id = str(message.chat.id)
+
+        with lock:
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM subscriptions WHERE chat_id=? AND coin=? AND timeframe=?", (chat_id, coin, timeframe))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                bot.reply_to(message, "Subscription not found.")
+                return
+            sub_id = row[0]
+            cur.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+            conn.commit()
+            conn.close()
+
+        # remove scheduled job
+        try:
+            scheduler.remove_job(str(sub_id))
+        except Exception:
+            pass
+
+        bot.reply_to(message, f"Stopped {coin} {timeframe} (id={sub_id}).")
+    except Exception as e:
+        bot.reply_to(message, "❌ Usage: /stop COIN TIMEFRAME")
+
+@bot.message_handler(commands=['reset'])
+def reset_cmd(message):
+    chat_id = str(message.chat.id)
+    with lock:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM subscriptions WHERE chat_id=?", (chat_id,))
+        rows = cur.fetchall()
+        cur.execute("DELETE FROM subscriptions WHERE chat_id=?", (chat_id,))
+        conn.commit()
+        conn.close()
+
+    for r in rows:
+        try:
+            scheduler.remove_job(str(r[0]))
+        except Exception:
+            pass
+
+    bot.reply_to(message, "All subscriptions cleared.")
+
+# ------------------------
+# Flask webhook (optional)
+# ------------------------
+@app.route("/" + BOT_TOKEN, methods=["POST"])
 def webhook():
-    json_str = request.get_data().decode("UTF-8")
+    json_str = request.stream.read().decode("UTF-8")
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
     return "ok", 200
 
 @app.route("/")
 def index():
-    return "Bot is running!", 200
+    return "Bot running"
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+# ------------------------
+# On start: ensure DB jobs scheduled
+# ------------------------
+schedule_all_subscriptions()
+
+if __name__ == '__main__':
+    bot.remove_webhook()
+    bot.polling(none_stop=True)
 
 
 

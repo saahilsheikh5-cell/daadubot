@@ -1,9 +1,7 @@
-Flask==2.3.2
 pyTelegramBotAPI==4.14.0
-gunicorn==20.1.0
 requests==2.30.0
 numpy==1.26.4
 pandas==2.1.1
 pandas_ta==0.3.14b
 APScheduler==3.10.4
-
+python-dotenv==1.0.0  # optional, for local env variables

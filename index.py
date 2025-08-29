@@ -1,279 +1,245 @@
 import os
 import time
-import logging
-import sqlite3
-import threading
-import requests
 import pandas as pd
-import pandas_ta as ta
-from apscheduler.schedulers.background import BackgroundScheduler
+import numpy as np
+from binance.client import Client
 import telebot
-from logging.handlers import TimedRotatingFileHandler
+import ta
 
 # ---------------------------
-# ENVIRONMENT VARIABLES
+# Environment variables
 # ---------------------------
-API_KEY = os.getenv("TELEGRAM_TOKEN")
-bot = telebot.TeleBot(API_KEY)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")  # Your Telegram chat ID
 
-# ---------------------------
-# LOGGING SETUP
-# ---------------------------
-log_handler = TimedRotatingFileHandler("bot.log", when="midnight", interval=1, backupCount=7)
-log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[log_handler])
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
 
 # ---------------------------
-# DATABASE SETUP
+# Initialize clients
 # ---------------------------
-DB_FILE = "settings.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS subscriptions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id TEXT,
-        coin TEXT,
-        interval_sec INTEGER,
-        threshold INTEGER
-    )
-    """)
-    conn.commit()
-    conn.close()
-
-def add_subscription(chat_id, coin, interval_sec, threshold):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO subscriptions (chat_id, coin, interval_sec, threshold) VALUES (?,?,?,?)",
-                (chat_id, coin, interval_sec, threshold))
-    conn.commit()
-    conn.close()
-
-def remove_subscription(chat_id, coin):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM subscriptions WHERE chat_id=? AND coin=?", (chat_id, coin))
-    conn.commit()
-    conn.close()
-
-def list_subscriptions(chat_id=None, all_chats=False):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    if all_chats:
-        cur.execute("SELECT chat_id, coin, interval_sec, threshold FROM subscriptions")
-    else:
-        cur.execute("SELECT coin, interval_sec, threshold FROM subscriptions WHERE chat_id=?", (chat_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def reset_settings(chat_id):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM subscriptions WHERE chat_id=?", (chat_id,))
-    conn.commit()
-    conn.close()
-
-def test_db_connection():
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute("SELECT 1")
-        conn.close()
-        return True
-    except:
-        return False
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 
 # ---------------------------
-# SIGNAL CALCULATION
+# User Settings
 # ---------------------------
-def fetch_klines(symbol, interval='1m', limit=200):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    data = requests.get(url).json()
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume","c1","c2","c3","c4","c5","ignore"
+TIMEFRAMES = ["1m", "5m", "15m", "1h"]  # Timeframes
+CONFIDENCE_THRESHOLD = 4  # Minimum indicators agreeing
+MAX_LEVERAGE = 20  # Max leverage allowed
+TOP_N_MOVERS = 5  # Number of coins to track as top movers
+
+# Risk management
+TOTAL_CAPITAL = 100000  # Example: your total capital in USD
+RISK_PER_TRADE = 1  # % of capital risk per trade
+
+# ---------------------------
+# Utility Functions
+# ---------------------------
+def get_ohlcv(symbol, interval, limit=200):
+    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    df = pd.DataFrame(klines, columns=[
+        "open_time","open","high","low","close","volume","close_time",
+        "quote_asset_volume","number_of_trades","taker_buy_base",
+        "taker_buy_quote","ignore"
     ])
-    df["close"] = df["close"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["volume"] = df["volume"].astype(float)
+    df = df[["open","high","low","close","volume"]].astype(float)
     return df
 
 def calculate_indicators(df):
-    indicators = {}
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    df['ema_short'] = ta.ema(df['close'], length=9)
-    df['ema_long'] = ta.ema(df['close'], length=21)
-    macd = ta.macd(df['close'])
-    df['macd'] = macd['MACD_12_26_9']
-    df['macd_signal'] = macd['MACDs_12_26_9']
-    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    indicators['rsi'] = df['rsi'].iloc[-1]
-    indicators['ema_short'] = df['ema_short'].iloc[-1]
-    indicators['ema_long'] = df['ema_long'].iloc[-1]
-    indicators['macd'] = df['macd'].iloc[-1]
-    indicators['macd_signal'] = df['macd_signal'].iloc[-1]
-    indicators['atr'] = df['atr'].iloc[-1]
-    indicators['close'] = df['close'].iloc[-1]
-    indicators['volume'] = df['volume'].iloc[-1]
-    return indicators
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+    macd = ta.trend.MACD(df['close'])
+    df['macd'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
+    df['ema9'] = ta.trend.EMAIndicator(df['close'], window=9).ema_indicator()
+    df['ema21'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
+    df['sma50'] = ta.trend.SMAIndicator(df['close'], window=50).sma_indicator()
+    df['sma200'] = ta.trend.SMAIndicator(df['close'], window=200).sma_indicator()
+    df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
+    return df
 
-def suggest_signal(ind):
-    # Ultra signal logic
+def detect_candlestick(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    body = abs(last['close'] - last['open'])
+    lower_shadow = last['open'] - last['low'] if last['close'] > last['open'] else last['close'] - last['low']
+    upper_shadow = last['high'] - max(last['close'], last['open'])
+    
+    if lower_shadow >= 2*body and upper_shadow <= body:
+        return "hammer"
+    if upper_shadow >= 2*body and lower_shadow <= body:
+        return "shooting_star"
+    if last['close'] > last['open'] and prev['close'] < prev['open'] and last['close'] > prev['open']:
+        return "bullish_engulfing"
+    if last['close'] < last['open'] and prev['close'] > prev['open'] and last['close'] < prev['open']:
+        return "bearish_engulfing"
+    if body <= 0.1 * (last['high'] - last['low']):
+        return "doji"
+    return None
+
+def volume_confirmation(df):
+    return df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1]
+
+def suggest_leverage(df, risk_percent=RISK_PER_TRADE):
+    """Suggest leverage based on ATR and price"""
+    last = df.iloc[-1]
+    atr = df['atr'].iloc[-1]
+    if atr == 0:
+        return 1
+    leverage = int((last['close'] * risk_percent/100) / atr)
+    return min(max(1, leverage), MAX_LEVERAGE)
+
+def calculate_position_size(entry, sl, leverage):
+    """Calculate position size based on risk and capital"""
+    risk_amount = TOTAL_CAPITAL * RISK_PER_TRADE / 100
+    stop_loss_distance = abs(entry - sl)
+    if stop_loss_distance == 0:
+        return 0
+    raw_size = risk_amount / stop_loss_distance
+    position_size = raw_size * leverage
+    return round(position_size, 4)
+
+def generate_signal(df):
+    df = calculate_indicators(df)
+    pattern = detect_candlestick(df)
+    vol_ok = volume_confirmation(df)
+    last = df.iloc[-1]
     score = 0
+    signal_type = None
+
     # RSI
-    if ind['rsi'] < 30:
-        score += 2
-    elif ind['rsi'] > 70:
-        score -= 2
-    # EMA crossover
-    if ind['ema_short'] > ind['ema_long']:
-        score += 1
-    elif ind['ema_short'] < ind['ema_long']:
-        score -= 1
+    if last['rsi'] < 30: score += 1; signal_type = "BUY"
+    elif last['rsi'] > 70: score += 1; signal_type = "SELL"
+
     # MACD
-    if ind['macd'] > ind['macd_signal']:
-        score += 1
-    else:
-        score -= 1
-    # Decide
-    if score >= 3:
-        signal = "BUY ✅"
-        leverage = 20
-    elif score <= -3:
-        signal = "SELL ❌"
-        leverage = 20
-    elif score == 2:
-        signal = "BUY ⚡"
-        leverage = 10
-    elif score == -2:
-        signal = "SELL ⚡"
-        leverage = 10
-    else:
-        signal = "NEUTRAL ⚖️"
-        leverage = 3
-    return signal, leverage
+    if last['macd'] > last['macd_signal']: score += 1; signal_type = "BUY"
+    elif last['macd'] < last['macd_signal']: score += 1; signal_type = "SELL"
 
-def analyze_and_signal(bot, chat_id, coin, threshold):
-    try:
-        df = fetch_klines(coin)
-        ind = calculate_indicators(df)
-        signal, leverage = suggest_signal(ind)
-        sl = round(ind['atr'] * 2, 2)
-        tp = round(ind['atr'] * 4, 2)
-        msgs = [
-            f"📊 {coin} Signal Update\nSignal: {signal}\nRSI: {round(ind['rsi'],2)}",
-            f"EMA Trend: Short({round(ind['ema_short'],2)}) / Long({round(ind['ema_long'],2)})",
-            f"MACD: {round(ind['macd'],2)} / Signal: {round(ind['macd_signal'],2)}",
-            f"ATR (SL suggestion): {sl}",
-            f"Volume: {ind['volume']}",
-            f"💰 Trade Plan:\nEntry: {ind['close']}\nSL: {sl}\nTP: {tp}\nSuggested Leverage: x{leverage}"
-        ]
-        for m in msgs:
-            bot.send_message(chat_id, m)
-            time.sleep(1)
-    except Exception as e:
-        logging.error(f"Error sending signal for {coin}: {e}")
+    # EMA
+    if last['ema9'] > last['ema21']: score += 1; signal_type = "BUY"
+    elif last['ema9'] < last['ema21']: score += 1; signal_type = "SELL"
+
+    # SMA
+    if last['sma50'] > last['sma200']: score += 1; signal_type = "BUY"
+    elif last['sma50'] < last['sma200']: score += 1; signal_type = "SELL"
+
+    # Candle patterns
+    if pattern in ["hammer", "bullish_engulfing"]: score += 1; signal_type = "BUY"
+    elif pattern in ["shooting_star", "bearish_engulfing"]: score += 1; signal_type = "SELL"
+
+    # Volume
+    if vol_ok: score += 1
+
+    if score >= CONFIDENCE_THRESHOLD:
+        entry = last['close']
+        sl = entry * 0.995 if signal_type == "BUY" else entry * 1.005
+        tp1 = entry * 1.01 if signal_type == "BUY" else entry * 0.99
+        tp2 = entry * 1.02 if signal_type == "BUY" else entry * 0.98
+        leverage = suggest_leverage(df)
+        position_size = calculate_position_size(entry, sl, leverage)
+        return {
+            "type": signal_type,
+            "entry": round(entry,2),
+            "sl": round(sl,2),
+            "tp1": round(tp1,2),
+            "tp2": round(tp2,2),
+            "leverage": leverage,
+            "position_size": position_size,
+            "score": score,
+            "pattern": pattern
+        }
+    return None
 
 # ---------------------------
-# SCHEDULER
+# Top Movers
 # ---------------------------
-scheduler = BackgroundScheduler()
-scheduler.start()
-
-def restore_jobs():
-    all_subs = list_subscriptions(all_chats=True)
-    for chat_id, coin, interval_sec, threshold in all_subs:
-        scheduler.add_job(analyze_and_signal, 'interval', seconds=interval_sec,
-                          args=[bot, chat_id, coin, threshold],
-                          id=f"{chat_id}_{coin}", replace_existing=True)
-        logging.info(f"Restored job: {chat_id} {coin} ({interval_sec}s)")
+def get_top_movers():
+    info = client.get_ticker()
+    df = pd.DataFrame(info)
+    df['priceChangePercent'] = df['priceChangePercent'].astype(float)
+    df = df[df['symbol'].str.endswith("USDT")]
+    top_gainers = df.sort_values(by='priceChangePercent', ascending=False).head(TOP_N_MOVERS)
+    return top_gainers['symbol'].tolist()
 
 # ---------------------------
-# TELEGRAM BOT COMMANDS
+# Telegram Handlers
 # ---------------------------
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.reply_to(message, "🤖 Welcome! Use /add SYMBOL INTERVAL_SECONDS THRESHOLD to start ultra signals.\nExample: /add BTCUSDT 60 70")
-    logging.info(f"/start called by {message.chat.id}")
+sent_signals = set()
 
-@bot.message_handler(commands=['add'])
-def add_coin(message):
-    try:
-        _, symbol, interval, threshold = message.text.split()
-        interval = int(interval)
-        threshold = int(threshold)
-        add_subscription(message.chat.id, symbol.upper(), interval, threshold)
-        scheduler.add_job(analyze_and_signal, 'interval', seconds=interval,
-                          args=[bot, message.chat.id, symbol.upper(), threshold],
-                          id=f"{message.chat.id}_{symbol}", replace_existing=True)
-        bot.reply_to(message, f"✅ Subscribed to {symbol.upper()} every {interval}s with threshold {threshold}")
-        logging.info(f"Added subscription for {message.chat.id}: {symbol.upper()}, {interval}s, threshold {threshold}")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Usage: /add BTCUSDT 60 70 — Error: {e}")
-        logging.error(f"Failed to add subscription: {e}")
+@bot.message_handler(commands=["mycoins"])
+def mycoins_dashboard(message):
+    symbols = get_top_movers()
+    msg = "Select coin and timeframe:\n"
+    for sym in symbols:
+        for tf in TIMEFRAMES:
+            msg += f"/{sym}_{tf}\n"
+    bot.send_message(message.chat.id, msg)
 
-@bot.message_handler(commands=['stop'])
-def stop_coin(message):
-    try:
-        _, symbol = message.text.split()
-        remove_subscription(message.chat.id, symbol.upper())
-        scheduler.remove_job(f"{message.chat.id}_{symbol.upper()}")
-        bot.reply_to(message, f"🛑 Stopped {symbol.upper()}")
-        logging.info(f"Stopped subscription for {message.chat.id}: {symbol.upper()}")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Usage: /stop BTCUSDT — Error: {e}")
-        logging.error(f"Failed to stop subscription: {e}")
-
-@bot.message_handler(commands=['mycoins'])
-def mycoins(message):
-    subs = list_subscriptions(message.chat.id)
-    if not subs:
-        bot.reply_to(message, "📭 No active subscriptions")
-    else:
-        msg = "📊 Your subscriptions:\n"
-        for s in subs:
-            msg += f"- {s[0]} (interval {s[1]}s, threshold {s[2]})\n"
-        bot.reply_to(message, msg)
-
-@bot.message_handler(commands=['reset'])
-def reset(message):
-    reset_settings(message.chat.id)
-    bot.reply_to(message, "♻️ All settings reset")
-    logging.info(f"Reset settings for {message.chat.id}")
-
-@bot.message_handler(commands=['logs'])
-def send_logs(message):
-    try:
-        if os.path.exists("bot.log"):
-            with open("bot.log", "rb") as f:
-                bot.send_document(message.chat.id, f)
-        else:
-            bot.reply_to(message, "⚠️ No log file found yet.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Failed to send logs: {e}")
-        logging.error(f"Failed to send logs: {e}")
-
-@bot.message_handler(commands=['health'])
-def health_check(message):
-    db_ok = test_db_connection()
-    sched_jobs = len(scheduler.get_jobs())
-    msg = f"🩺 Health Check:\n- DB Connection: {'✅' if db_ok else '❌'}\n- Scheduled Jobs: {sched_jobs}\n- Bot: ✅ Running"
-    bot.reply_to(message, msg)
+# Dynamic handlers for each coin/timeframe
+def create_handlers():
+    symbols = get_top_movers()
+    for sym in symbols:
+        for tf in TIMEFRAMES:
+            cmd = f"/{sym}_{tf}"
+            def handler(message, s=sym, t=tf):
+                try:
+                    df = get_ohlcv(s, t)
+                    signal = generate_signal(df)
+                    if signal:
+                        msg_text = (
+                            f"🚀 {signal['type']} SIGNAL\n"
+                            f"Coin: {s}\nTimeframe: {t}\n"
+                            f"Entry: {signal['entry']}\nSL: {signal['sl']}\n"
+                            f"TP1: {signal['tp1']} | TP2: {signal['tp2']}\n"
+                            f"Suggested Leverage: {signal['leverage']}x\n"
+                            f"Position Size: {signal['position_size']} units\n"
+                            f"Confidence Score: {signal['score']}\n"
+                            f"Candle Pattern: {signal['pattern']}"
+                        )
+                    else:
+                        msg_text = f"No strong signal for {s} on {t} timeframe."
+                    bot.send_message(message.chat.id, msg_text)
+                except Exception as e:
+                    bot.send_message(message.chat.id, f"Error: {e}")
+            bot.message_handler(commands=[cmd])(handler)
 
 # ---------------------------
-# MAIN
+# Auto Signals Loop
+# ---------------------------
+def run_auto_signals():
+    global sent_signals
+    while True:
+        symbols = get_top_movers()
+        for symbol in symbols:
+            for tf in TIMEFRAMES:
+                try:
+                    df = get_ohlcv(symbol, tf)
+                    signal = generate_signal(df)
+                    if signal:
+                        unique_id = f"{symbol}-{tf}-{signal['type']}-{df.index[-1]}"
+                        if unique_id not in sent_signals:
+                            msg = (
+                                f"🚀 {signal['type']} SIGNAL\n"
+                                f"Coin: {symbol}\nTimeframe: {tf}\n"
+                                f"Entry: {signal['entry']}\nSL: {signal['sl']}\n"
+                                f"TP1: {signal['tp1']} | TP2: {signal['tp2']}\n"
+                                f"Suggested Leverage: {signal['leverage']}x\n"
+                                f"Position Size: {signal['position_size']} units\n"
+                                f"Confidence Score: {signal['score']}\n"
+                                f"Candle Pattern: {signal['pattern']}"
+                            )
+                            bot.send_message(CHAT_ID, msg)
+                            sent_signals.add(unique_id)
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"Error for {symbol} {tf}: {e}")
+        time.sleep(60)
+
+# ---------------------------
+# Start Bot
 # ---------------------------
 if __name__ == "__main__":
-    init_db()
-    restore_jobs()
-    while True:
-        try:
-            logging.info("Bot polling started...")
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        except Exception as e:
-            logging.error(f"Polling error: {e}. Restarting in 5s...")
-            time.sleep(5)
-
-
+    import threading
+    create_handlers()
+    threading.Thread(target=run_auto_signals).start()
+    bot.infinity_polling()

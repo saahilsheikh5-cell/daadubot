@@ -1,6 +1,5 @@
 pyTelegramBotAPI==4.12.0
-pandas==2.1.0
-numpy==1.27.5
+pandas==2.0.3
+numpy==1.26.4
 ta==0.10.2
 requests==2.32.0
-

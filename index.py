@@ -1,117 +1,135 @@
 import os
 import time
+import requests
 import pandas as pd
-import numpy as np
-from binance.client import Client
-import talib
+from threading import Thread
 from ta.momentum import RSIIndicator
+from ta.trend import MACD
+from ta.volatility import BollingerBands
 import telebot
 
-# --------------------------
-# Environment Variables
-# --------------------------
+# === ENV VARIABLES ===
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
-BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
-
-if not TELEGRAM_TOKEN or not BINANCE_API_KEY or not BINANCE_API_SECRET:
-    raise Exception("Missing TELEGRAM_TOKEN or Binance API keys in environment variables.")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 
-# --------------------------
-# Technical Indicators
-# --------------------------
-def get_signals(symbol, interval='1h', limit=500):
-    """
-    Returns signals for a given symbol and interval based on multiple indicators.
-    Only returns 'strong' signals.
-    """
-    try:
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-        df = pd.DataFrame(klines, columns=['OpenTime','Open','High','Low','Close','Volume',
-                                           'CloseTime','QuoteAssetVolume','Trades','TBBV','TBAV','Ignore'])
-        df = df.astype({'Open':'float','High':'float','Low':'float','Close':'float','Volume':'float'})
-        
-        close = df['Close']
-        
-        # RSI
-        rsi = RSIIndicator(close, window=14).rsi()
-        last_rsi = rsi.iloc[-1]
-        
-        # MACD
-        macd, macd_signal, _ = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
-        last_macd = macd.iloc[-1]
-        last_macd_signal = macd_signal.iloc[-1]
-        
-        # Candle pattern (example: bullish engulfing)
-        candle = talib.CDLENGULFING(df['Open'], df['High'], df['Low'], df['Close'])
-        last_candle = candle.iloc[-1]
-        
-        # Combine signals
-        signals = []
-        if last_rsi < 30:
-            signals.append("RSI oversold")
-        elif last_rsi > 70:
-            signals.append("RSI overbought")
-            
-        if last_macd > last_macd_signal:
-            signals.append("MACD bullish")
-        elif last_macd < last_macd_signal:
-            signals.append("MACD bearish")
-        
-        if last_candle > 0:
-            signals.append("Bullish Engulfing")
-        elif last_candle < 0:
-            signals.append("Bearish Engulfing")
-        
-        # Only return strong signals (at least 2 indicators aligned)
-        if len(signals) >= 2:
-            return signals
-        else:
-            return []
-        
-    except Exception as e:
-        print(f"Error fetching signals for {symbol}: {e}")
-        return []
+# === SETTINGS ===
+COINS = ["BTCUSDT", "ETHUSDT"]  # Add more coins here
+INTERVALS = ["1m", "5m", "15m", "1h", "1d"]
+RSI_PERIOD = 14
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+BOLLINGER_WINDOW = 20
+BOLLINGER_STD = 2
+MIN_INDICATORS_FOR_SIGNAL = 3
 
-# --------------------------
-# Bot Commands
-# --------------------------
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "Welcome! Use /signal <COIN> <INTERVAL> to get signals.")
+# Suggested leverage map per coin
+LEVERAGE = {
+    "BTCUSDT": 5,
+    "ETHUSDT": 10
+}
 
-@bot.message_handler(commands=['signal'])
-def send_signal(message):
-    try:
-        args = message.text.split()
-        if len(args) != 3:
-            bot.reply_to(message, "Usage: /signal <COIN> <INTERVAL>\nExample: /signal BTCUSDT 1h")
-            return
-        symbol = args[1].upper()
-        interval = args[2]
-        signals = get_signals(symbol, interval)
-        if signals:
-            bot.reply_to(message, f"Strong signals for {symbol} ({interval}):\n- " + "\n- ".join(signals))
-        else:
-            bot.reply_to(message, f"No strong signals for {symbol} ({interval}) at the moment.")
-    except Exception as e:
-        bot.reply_to(message, f"Error: {e}")
+# Keep track of last signals to avoid duplicate alerts
+LAST_SIGNAL = {coin: {interval: None for interval in INTERVALS} for coin in COINS}
 
-# --------------------------
-# Auto Signal Broadcast (optional)
-# --------------------------
-def broadcast_signals(coins, interval='1h', chat_id=None):
-    for coin in coins:
-        signals = get_signals(coin, interval)
-        if signals and chat_id:
-            bot.send_message(chat_id, f"Strong signals for {coin} ({interval}):\n- " + "\n- ".join(signals))
+# === FUNCTIONS ===
 
-# --------------------------
-# Run Bot
-# --------------------------
+def fetch_ohlcv(symbol, interval="1m", limit=100):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    data = requests.get(url).json()
+    df = pd.DataFrame(data, columns=[
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "trades", "taker_buy_base",
+        "taker_buy_quote", "ignore"
+    ])
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]].astype(float)
+    return df
+
+def analyze_coin(df):
+    signals = []
+    close = df['close']
+
+    # --- RSI ---
+    rsi = RSIIndicator(close, RSI_PERIOD).rsi()
+    if rsi.iloc[-1] > 70:
+        signals.append("overbought")
+    elif rsi.iloc[-1] < 30:
+        signals.append("oversold")
+
+    # --- MACD ---
+    macd_line = MACD(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL).macd()
+    signal_line = MACD(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL).macd_signal()
+    if macd_line.iloc[-1] > signal_line.iloc[-1]:
+        signals.append("macd_buy")
+    elif macd_line.iloc[-1] < signal_line.iloc[-1]:
+        signals.append("macd_sell")
+
+    # --- Bollinger Bands ---
+    bb = BollingerBands(close, BOLLINGER_WINDOW, BOLLINGER_STD)
+    if close.iloc[-1] > bb.bollinger_hband().iloc[-1]:
+        signals.append("bb_sell")
+    elif close.iloc[-1] < bb.bollinger_lband().iloc[-1]:
+        signals.append("bb_buy")
+
+    # --- Final Signal ---
+    buy_signals = ["oversold", "macd_buy", "bb_buy"]
+    sell_signals = ["overbought", "macd_sell", "bb_sell"]
+
+    if sum(sig in buy_signals for sig in signals) >= MIN_INDICATORS_FOR_SIGNAL:
+        return "BUY"
+    elif sum(sig in sell_signals for sig in signals) >= MIN_INDICATORS_FOR_SIGNAL:
+        return "SELL"
+    else:
+        return None
+
+def calculate_levels(df, signal):
+    close = df['close'].iloc[-1]
+    if signal == "BUY":
+        entry = close
+        stop_loss = close * 0.995  # 0.5% below entry
+        tp1 = close * 1.01
+        tp2 = close * 1.02
+    elif signal == "SELL":
+        entry = close
+        stop_loss = close * 1.005  # 0.5% above entry
+        tp1 = close * 0.99
+        tp2 = close * 0.98
+    else:
+        entry = stop_loss = tp1 = tp2 = None
+    return entry, stop_loss, tp1, tp2
+
+def send_signal(symbol, interval, signal, entry, stop_loss, tp1, tp2, leverage):
+    msg = (
+        f"🚀 Signal for {symbol} [{interval}]: {signal}\n"
+        f"Leverage: {leverage}x\n"
+        f"Entry: {entry:.2f}\n"
+        f"Stop Loss: {stop_loss:.2f}\n"
+        f"TP1: {tp1:.2f} | TP2: {tp2:.2f}"
+    )
+    bot.send_message(CHAT_ID, msg)
+
+def run_bot():
+    while True:
+        try:
+            for coin in COINS:
+                for interval in INTERVALS:
+                    df = fetch_ohlcv(coin, interval)
+                    signal = analyze_coin(df)
+                    # Avoid duplicate signals
+                    if signal and signal != LAST_SIGNAL[coin][interval]:
+                        entry, stop_loss, tp1, tp2 = calculate_levels(df, signal)
+                        send_signal(coin, interval, signal, entry, stop_loss, tp1, tp2, LEVERAGE.get(coin, 1))
+                        LAST_SIGNAL[coin][interval] = signal
+            time.sleep(60)
+        except Exception as e:
+            print("Error:", e)
+            time.sleep(10)
+
+# === START THREAD ===
 if __name__ == "__main__":
-    print("Bot is running...")
+    thread = Thread(target=run_bot)
+    thread.start()
     bot.infinity_polling()
+

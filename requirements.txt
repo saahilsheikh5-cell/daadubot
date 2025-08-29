@@ -1,7 +1,7 @@
-pyTelegramBotAPI==4.14.0
-requests==2.30.0
-numpy==1.26.4
+python-telegram-bot==3.19.1
+pyTelegramBotAPI==4.12.0
 pandas==2.1.1
-pandas_ta==0.3.14b
-APScheduler==3.10.4
-python-dotenv==1.0.0
+numpy==1.26.0
+TA-Lib==0.4.27
+ta==0.10.2
+python-binance==1.0.27

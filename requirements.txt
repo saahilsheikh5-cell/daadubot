@@ -5,3 +5,5 @@ requests==2.30.0
 numpy==1.26.4
 pandas==2.1.1
 pandas_ta==0.3.14b
+APScheduler==3.10.4
+

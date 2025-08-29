@@ -4,4 +4,4 @@ numpy==1.26.4
 pandas==2.1.1
 pandas_ta==0.3.14b
 APScheduler==3.10.4
-python-dotenv==1.0.0  # optional, for local env variables
+python-dotenv==1.0.0

@@ -757,7 +757,7 @@ def webhook():
             if state == "settings_menu":
                 if text == "🔙 Back":
                     send_main_menu(chat_id); return "ok", 200
-                if text == "Set RSI Buy
+                if text == "Set RSI Buy:
 
 
 

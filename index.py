@@ -1,4 +1,4 @@
-import os, json, time, logging, threading, traceback
+port os, json, time, logging, threading, traceback
 from typing import Dict, Any, List, Tuple
 import requests
 import numpy as np
@@ -757,87 +757,7 @@ def webhook():
             if state == "settings_menu":
                 if text == "🔙 Back":
                     send_main_menu(chat_id); return "ok", 200
-                if text == "Set RSI Buy":
-                    set_state(str(chat_id), "set_rsi_buy")
-                    bot.send_message(chat_id, "Send RSI Buy threshold (e.g., 25):", reply_markup=back_kb())
-                elif text == "Set RSI Sell":
-                    set_state(str(chat_id), "set_rsi_sell")
-                    bot.send_message(chat_id, "Send RSI Sell threshold (e.g., 75):", reply_markup=back_kb())
-                elif text == "Set Validity (min)":
-                    set_state(str(chat_id), "set_validity")
-                    bot.send_message(chat_id, "Send signal validity minutes (e.g., 15):", reply_markup=back_kb())
-                elif text == "Set Leverage Cap":
-                    set_state(str(chat_id), "set_lev_cap")
-                    bot.send_message(chat_id, "Send leverage cap (e.g., 20):", reply_markup=back_kb())
-                else:
-                    bot.send_message(chat_id, "Choose a setting to change.", reply_markup=settings_kb())
-                return "ok", 200
-
-            if state in ["set_rsi_buy", "set_rsi_sell", "set_validity", "set_lev_cap"]:
-                if text == "🔙 Back":
-                    handle_settings_menu(chat_id); return "ok", 200
-                if not text.isdigit():
-                    bot.send_message(chat_id, "❌ Send a number.", reply_markup=back_kb()); return "ok", 200
-                val = int(text)
-                st = get_settings(str(chat_id))
-                if state == "set_rsi_buy":
-                    st["rsi_buy"] = max(1, min(49, val))
-                elif state == "set_rsi_sell":
-                    st["rsi_sell"] = max(51, min(99, val))
-                elif state == "set_validity":
-                    st["signal_validity_min"] = max(1, min(240, val))
-                elif state == "set_lev_cap":
-                    st["leverage_cap"] = max(1, min(125, val))
-                settings_db[str(chat_id)] = st
-                save_json(SETTINGS_FILE, settings_db)
-                bot.send_message(chat_id, "✅ Saved.", reply_markup=main_menu_kb())
-                set_state(str(chat_id), None)
-                return "ok", 200
-
-            # ===== FALLBACK: quick add or view =====
-            if text.isalnum() and text.upper().endswith("USDT"):
-                # treat as quick analysis for a coin
-                sym = text.upper()
-                ok, _ = get_klines(sym, "1m", 2)
-                if ok:
-                    kb = timeframes_kb(include_back=True)
-                    set_state(str(chat_id), "view_tf", coin=sym)
-                    bot.send_message(chat_id, f"Select timeframe for <b>{sym}</b>:", reply_markup=kb)
-                else:
-                    bot.send_message(chat_id, "❌ Unknown command. Use /start.", reply_markup=main_menu_kb())
-                return "ok", 200
-
-            bot.send_message(chat_id, "❌ Unknown command. Use /start.", reply_markup=main_menu_kb())
-        return "ok", 200
-    except Exception:
-        log.error("webhook handler error:\n%s", traceback.format_exc())
-        try:
-            if "message" in update_json:
-                chat_id = update_json["message"]["chat"]["id"]
-                bot.send_message(chat_id, "⚠️ Internal error. Try again.")
-        except Exception:
-            pass
-        return "ok", 200
-
-# ========= Webhook setup =========
-def setup_webhook():
-    try:
-        log.info("Resetting Telegram webhook...")
-        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
-        url = f"{PUBLIC_URL}{WEBHOOK_URL_PATH}"
-        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", params={"url": url}, timeout=10)
-        log.info(f"Webhook set response: {r.json()}")
-    except Exception:
-        log.error("setup_webhook error:\n%s", traceback.format_exc())
-
-# ========= STARTUP =========
-setup_webhook()
-maybe_start_scanner_once()
-
-if __name__ == "__main__":
-    # Local run (optional)
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
+                if text == "Set RSI Buy
 
 
 

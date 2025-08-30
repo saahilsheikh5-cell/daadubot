@@ -1,6 +1,5 @@
 import os
 import json
-import threading
 import time
 import telebot
 from telebot import types
@@ -11,9 +10,7 @@ import ta
 # ==== ENVIRONMENT VARS ====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-BINANCE_API_SECRET = os.getenv("BINANCE_SECRET")  # Note: use same key name as Render env var
-
-MIN_VOLUME_USDT = 100000  # Minimum 24h volume filter for top movers
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 if not TELEGRAM_TOKEN or not BINANCE_API_KEY or not BINANCE_API_SECRET:
     raise RuntimeError("Please set TELEGRAM_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET env vars.")
@@ -45,7 +42,6 @@ def get_signal(symbol, interval="5m", lookback=100):
         df["c"] = df["c"].astype(float)
         df["h"] = df["h"].astype(float)
         df["l"] = df["l"].astype(float)
-        df["v"] = df["v"].astype(float)
 
         # Indicators
         df["rsi"] = ta.momentum.RSIIndicator(df["c"], window=14).rsi()
@@ -53,21 +49,21 @@ def get_signal(symbol, interval="5m", lookback=100):
         df["macd"] = macd.macd()
         df["macd_signal"] = macd.macd_signal()
         df["ma50"] = df["c"].rolling(50).mean()
-        df["bb_upper"] = ta.volatility.BollingerBands(df["c"], window=20).bollinger_hband()
-        df["bb_lower"] = ta.volatility.BollingerBands(df["c"], window=20).bollinger_lband()
-        df["stoch"] = ta.momentum.StochasticOscillator(df["h"], df["l"], df["c"]).stoch()
+        df["ma200"] = df["c"].rolling(200).mean()
+
         last = df.iloc[-1]
 
         decision = "Neutral"
         explanation = []
 
-        # Strong signal conditions
-        if last["rsi"] < 30 and last["macd"] > last["macd_signal"] and last["c"] > last["ma50"]:
-            decision = "✅ Ultra BUY"
-            explanation.append("RSI oversold + MACD bullish + Above MA50")
-        elif last["rsi"] > 70 and last["macd"] < last["macd_signal"] and last["c"] < last["ma50"]:
-            decision = "❌ Ultra SELL"
-            explanation.append("RSI overbought + MACD bearish + Below MA50")
+        # Strong BUY condition
+        if last["rsi"] < 30 and last["macd"] > last["macd_signal"] and last["c"] > last["ma50"] and last["c"] > last["ma200"]:
+            decision = "✅ STRONG BUY"
+            explanation.append("RSI oversold + MACD bullish + Above MA50 & MA200")
+        # Strong SELL condition
+        elif last["rsi"] > 70 and last["macd"] < last["macd_signal"] and last["c"] < last["ma50"] and last["c"] < last["ma200"]:
+            decision = "❌ STRONG SELL"
+            explanation.append("RSI overbought + MACD bearish + Below MA50 & MA200")
 
         signal_text = f"""
 📊 Signal for {symbol} [{interval}]
@@ -83,16 +79,9 @@ SL: {round(last['c']*0.99,4)}
 Suggested Leverage: x10
 Notes: {" | ".join(explanation) if explanation else "Mixed signals"}
         """
-        return signal_text, decision
+        return decision, signal_text
     except Exception as e:
-        return f"⚠️ Error fetching data for {symbol} {interval}: {e}", "Neutral"
-
-
-def get_top_movers(limit=5):
-    tickers = client.get_ticker()
-    filtered = [t for t in tickers if float(t['quoteVolume']) > MIN_VOLUME_USDT and t['symbol'].endswith("USDT")]
-    sorted_tickers = sorted(filtered, key=lambda x: abs(float(x['priceChangePercent'])), reverse=True)
-    return [t['symbol'] for t in sorted_tickers[:limit]]
+        return "Error", f"⚠️ Error fetching data for {symbol} {interval}: {e}"
 
 
 # ==== MENUS ====
@@ -112,12 +101,12 @@ def signals_menu():
 
 def top_movers_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("1️⃣ 1 Min", "5️⃣ 5 Min", "1️⃣5️⃣ 15 Min")
+    kb.add("5m Signals", "15m Signals", "1h Signals")
     kb.add("⬅️ Back")
     return kb
 
 
-# ==== TELEGRAM HANDLERS ====
+# ==== HANDLERS ====
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.send_message(message.chat.id, "🤖 Welcome to Ultra Signals Bot!", reply_markup=main_menu())
@@ -140,9 +129,9 @@ def my_coins(message):
         bot.send_message(message.chat.id, "❌ No coins added yet. Use ➕ Add Coin.")
         return
     for c in coins:
-        for interval in ["1m", "5m", "15m", "1h", "1d"]:
-            txt, decision = get_signal(c, interval)
-            if decision != "Neutral":
+        for tf in ["5m","15m","1h"]:
+            decision, txt = get_signal(c, tf)
+            if "STRONG" in decision:
                 bot.send_message(message.chat.id, txt)
 
 
@@ -150,8 +139,8 @@ def my_coins(message):
 def all_coins(message):
     tickers = [s["symbol"] for s in client.get_all_tickers() if s["symbol"].endswith("USDT")]
     for c in tickers[:10]:
-        txt, decision = get_signal(c, "5m")
-        if decision != "Neutral":
+        decision, txt = get_signal(c, "5m")
+        if "STRONG" in decision:
             bot.send_message(message.chat.id, txt)
 
 
@@ -163,25 +152,32 @@ def ask_coin(message):
 
 def particular_coin(message):
     symbol = message.text.upper()
-    for interval in ["1m", "5m", "15m", "1h", "1d"]:
-        txt, decision = get_signal(symbol, interval)
-        if decision != "Neutral":
+    for tf in ["1m","5m","15m","1h","1d"]:
+        decision, txt = get_signal(symbol, tf)
+        if "STRONG" in decision:
             bot.send_message(message.chat.id, txt)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "🚀 Top Movers")
-def top_movers_handler(message):
-    bot.send_message(message.chat.id, "Select timeframe for Top Movers signals:", reply_markup=top_movers_menu())
+def top_movers(message):
+    tickers = client.get_ticker_24hr()
+    sorted_tickers = sorted(tickers, key=lambda x: float(x["priceChangePercent"]), reverse=True)
+    top = [t["symbol"] for t in sorted_tickers if t["symbol"].endswith("USDT")][:5]
+
+    for c in top:
+        bot.send_message(message.chat.id, f"Top Mover: {c}", reply_markup=top_movers_menu())
 
 
-@bot.message_handler(func=lambda msg: msg.text in ["1️⃣ 1 Min", "5️⃣ 5 Min", "1️⃣5️⃣ 15 Min"])
-def top_movers_signals(message):
-    interval_map = {"1️⃣ 1 Min": "1m", "5️⃣ 5 Min": "5m", "1️⃣5️⃣ 15 Min": "15m"}
-    interval = interval_map[message.text]
-    movers = get_top_movers(limit=5)
-    for c in movers:
-        txt, decision = get_signal(c, interval)
-        if decision != "Neutral":
+@bot.message_handler(func=lambda msg: msg.text in ["5m Signals","15m Signals","1h Signals"])
+def top_mover_signals(message):
+    tf_map = {"5m":"5m","15m":"15m","1h":"1h"}
+    tf = tf_map[message.text]
+    tickers = client.get_ticker_24hr()
+    sorted_tickers = sorted(tickers, key=lambda x: float(x["priceChangePercent"]), reverse=True)
+    top = [t["symbol"] for t in sorted_tickers if t["symbol"].endswith("USDT")][:5]
+    for c in top:
+        decision, txt = get_signal(c, tf)
+        if "STRONG" in decision:
             bot.send_message(message.chat.id, txt)
 
 
@@ -219,21 +215,8 @@ def delete_coin(message):
         bot.send_message(message.chat.id, "⚠️ Coin not found in list.")
 
 
-# ==== BACKGROUND SCALPING ALERTS ====
-def continuous_alerts():
-    while True:
-        coins = load_coins()
-        for c in coins:
-            for interval in ["1m", "5m"]:
-                txt, decision = get_signal(c, interval)
-                if decision != "Neutral":
-                    bot.send_message(chat_id=os.getenv("CHAT_ID"), text=txt)
-        time.sleep(30)  # check every 30 seconds
-
-
-threading.Thread(target=continuous_alerts, daemon=True).start()
-
-# ==== RUN ====
+# ==== RUN CONTINUOUSLY ====
 print("🚀 Bot is running...")
 bot.infinity_polling()
+
 

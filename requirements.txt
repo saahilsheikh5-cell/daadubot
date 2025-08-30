@@ -1,8 +1,7 @@
 pyTelegramBotAPI==4.12.0
-python-binance==1.0.15
-pandas==2.1.1
-numpy==1.26.2
+python-binance==1.0.16
+pandas==2.2.4
 ta==0.10.3
-Flask==2.3.2
+
 
 

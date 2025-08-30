@@ -1,8 +1,21 @@
-Flask==2.3.3
+# Telegram
 pyTelegramBotAPI==4.12.0
-python-binance==1.0.15
+
+# Binance API
+python-binance==1.0.16
+
+# Data handling
+numpy==1.26.4
 pandas==2.1.0
+
+# Technical Analysis
 ta==0.10.2
+
+# Web server
+Flask==2.3.3
+gunicorn==20.1.0
+
+# Optional utilities
 requests==2.31.0
 
 

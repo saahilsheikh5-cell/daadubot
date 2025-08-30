@@ -1,6 +1,6 @@
-Flask==2.3.3
 pyTelegramBotAPI==4.12.0
-python-binance==1.0.15
-pandas==2.1.0
-ta==0.10.2
+python-binance==1.0.16
+pandas==2.0.3
+TA-Lib==0.4.27
+ta==0.10.3
 numpy==1.25.2

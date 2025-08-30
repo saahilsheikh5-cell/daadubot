@@ -6,7 +6,6 @@ from telebot import types
 from binance.client import Client
 import pandas as pd
 import ta
-import datetime
 
 # ==== ENVIRONMENT CHECK ====
 required_env_vars = ["TELEGRAM_TOKEN", "BINANCE_API_KEY", "BINANCE_API_SECRET"]
@@ -14,18 +13,20 @@ missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 
 if missing_vars:
     print(f"❌ Missing environment variables: {', '.join(missing_vars)}")
-    print("Make sure these are set in Render under your service → Environment → Environment Variables")
     sys.exit(1)
 
 # ==== ENVIRONMENT VARS ====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-print("✅ All required environment variables are set.")
 
 # ==== INIT BOT & BINANCE CLIENT ====
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Client(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+
+# ==== REMOVE ANY EXISTING WEBHOOK ====
+bot.remove_webhook()
+print("✅ Webhook removed. Bot ready to use getUpdates polling.")
 
 COINS_FILE = "my_coins.json"
 
@@ -180,4 +181,5 @@ def delete_coin(message):
 # ==== RUN BOT ====
 print("🚀 Bot is running...")
 bot.infinity_polling()
+
 

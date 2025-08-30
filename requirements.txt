@@ -11,5 +11,5 @@ numpy==1.26.0
 # Technical analysis indicators
 ta==0.10.1
 
-# Optional: for HTTP requests if needed
+# Optional HTTP requests
 requests==2.31.0

@@ -1,2 +1,3 @@
-web: python index.py
+web: gunicorn index:app --bind 0.0.0.0:$PORT --workers 1 --threads 2
+
 

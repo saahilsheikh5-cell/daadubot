@@ -6,6 +6,8 @@ from binance.client import Client
 import pandas as pd
 import ta
 import datetime
+import time
+import threading
 
 # ==== ENVIRONMENT VARS ====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -19,10 +21,13 @@ if not TELEGRAM_TOKEN or not BINANCE_API_KEY or not BINANCE_API_SECRET:
 
 # ==== INIT BOT AND BINANCE CLIENT ====
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-bot.remove_webhook()  # avoid 409 error if webhook exists
+bot.remove_webhook()
 client = Client(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
 
 COINS_FILE = "my_coins.json"
+INTERVALS = ["1m", "5m", "15m", "1h", "1d"]
+MIN_PRICE_FILTER = 0.5  # Avoid very small coins
+ALERTED_SIGNALS = set()  # To avoid duplicate alerts
 
 # ==== HELPERS ====
 def load_coins():
@@ -37,29 +42,21 @@ def save_coins(coins):
         json.dump(coins, f)
 
 
-def get_signal(symbol, interval="5m", lookback=100):
+def get_strong_signal(symbol, interval="5m", lookback=100):
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
         df = pd.DataFrame(
             klines,
             columns=[
-                "time",
-                "o",
-                "h",
-                "l",
-                "c",
-                "v",
-                "ct",
-                "qav",
-                "ntr",
-                "tbbav",
-                "tbqav",
-                "ignore",
+                "time", "o", "h", "l", "c", "v", "ct", "qav", "ntr", "tbbav", "tbqav", "ignore"
             ],
         )
         df["c"] = df["c"].astype(float)
         df["h"] = df["h"].astype(float)
         df["l"] = df["l"].astype(float)
+
+        if df["c"].iloc[-1] < MIN_PRICE_FILTER:
+            return None  # Skip small coins
 
         df["rsi"] = ta.momentum.RSIIndicator(df["c"], window=14).rsi()
         macd = ta.trend.MACD(df["c"])
@@ -68,16 +65,18 @@ def get_signal(symbol, interval="5m", lookback=100):
         df["ma50"] = df["c"].rolling(50).mean()
         last = df.iloc[-1]
 
-        decision = "Neutral"
+        decision = None
         explanation = []
 
-        # STRONG SIGNAL CONDITIONS
         if last["rsi"] < 30 and last["macd"] > last["macd_signal"] and last["c"] > last["ma50"]:
             decision = "✅ Strong BUY"
             explanation.append("RSI oversold + MACD bullish + Above MA50")
         elif last["rsi"] > 70 and last["macd"] < last["macd_signal"] and last["c"] < last["ma50"]:
             decision = "❌ Strong SELL"
             explanation.append("RSI overbought + MACD bearish + Below MA50")
+
+        if not decision:
+            return None  # Only strong signals
 
         signal_text = f"""
 📊 Signal for {symbol} [{interval}]
@@ -91,7 +90,7 @@ TP1: {round(last['c']*1.01,4)}
 TP2: {round(last['c']*1.02,4)}
 SL: {round(last['c']*0.99,4)}
 Suggested Leverage: x10
-Notes: {" | ".join(explanation) if explanation else "Mixed signals"}
+Notes: {" | ".join(explanation)}
         """
         return signal_text
     except Exception as e:
@@ -116,9 +115,7 @@ def signals_menu():
 # ==== HANDLERS ====
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(
-        message.chat.id, "🤖 Welcome to Ultra Signals Bot!", reply_markup=main_menu()
-    )
+    bot.send_message(message.chat.id, "🤖 Welcome to Ultra Signals Bot!", reply_markup=main_menu())
 
 
 @bot.message_handler(func=lambda msg: msg.text == "⬅️ Back")
@@ -138,16 +135,20 @@ def my_coins(message):
         bot.send_message(message.chat.id, "❌ No coins added yet. Use ➕ Add Coin.")
         return
     for c in coins:
-        txt = get_signal(c, "5m") + "\n" + get_signal(c, "1h") + "\n" + get_signal(c, "1d")
-        bot.send_message(message.chat.id, txt)
+        for interval in INTERVALS:
+            txt = get_strong_signal(c, interval)
+            if txt:
+                bot.send_message(message.chat.id, txt)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "🌍 All Coins")
 def all_coins(message):
     tickers = [s["symbol"] for s in client.get_all_tickers() if s["symbol"].endswith("USDT")]
-    for c in tickers[:10]:  # limit first 10 to avoid spam
-        txt = get_signal(c, "5m")
-        bot.send_message(message.chat.id, txt)
+    for c in tickers[:10]:
+        for interval in INTERVALS:
+            txt = get_strong_signal(c, interval)
+            if txt:
+                bot.send_message(message.chat.id, txt)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "🔎 Particular Coin")
@@ -158,20 +159,22 @@ def ask_coin(message):
 
 def particular_coin(message):
     symbol = message.text.upper()
-    txt = get_signal(symbol, "1m") + "\n" + get_signal(symbol, "5m") + "\n" + get_signal(symbol, "1h")
-    bot.send_message(message.chat.id, txt)
+    for interval in INTERVALS:
+        txt = get_strong_signal(symbol, interval)
+        if txt:
+            bot.send_message(message.chat.id, txt)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "🚀 Top Movers")
 def top_movers(message):
     tickers = client.get_ticker_24hr()
-    sorted_tickers = sorted(
-        tickers, key=lambda x: float(x["priceChangePercent"]), reverse=True
-    )
+    sorted_tickers = sorted(tickers, key=lambda x: float(x["priceChangePercent"]), reverse=True)
     top = [t["symbol"] for t in sorted_tickers if t["symbol"].endswith("USDT")][:5]
     for c in top:
-        txt = get_signal(c, "5m")
-        bot.send_message(message.chat.id, txt)
+        for interval in INTERVALS:
+            txt = get_strong_signal(c, interval)
+            if txt:
+                bot.send_message(message.chat.id, txt)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "➕ Add Coin")
@@ -208,8 +211,37 @@ def delete_coin(message):
         bot.send_message(message.chat.id, "⚠️ Coin not found in list.")
 
 
-# ==== RUN BOT ====
-print("🚀 Bot is running...")
-bot.infinity_polling()
+# ==== BACKGROUND SIGNAL CHECKER ====
+def background_checker():
+    while True:
+        coins = load_coins()
+        tickers = client.get_ticker_24hr()
+        top = sorted(tickers, key=lambda x: float(x["priceChangePercent"]), reverse=True)
+        top_coins = [t["symbol"] for t in top if t["symbol"].endswith("USDT")][:5]
+
+        symbols_to_check = set(coins + top_coins)
+
+        for sym in symbols_to_check:
+            for interval in INTERVALS:
+                signal_text = get_strong_signal(sym, interval)
+                if signal_text and (sym, interval) not in ALERTED_SIGNALS:
+                    ALERTED_SIGNALS.add((sym, interval))
+                    # Broadcast to all users in coins file (or implement your chat list)
+                    # For simplicity, sending to one chat: replace with your chat ID
+                    bot.send_message(os.getenv("CHAT_ID"), signal_text)
+        time.sleep(60)  # Check every minute
+
+
+# ==== RUN BOT AND BACKGROUND THREAD ====
+if __name__ == "__main__":
+    print("🚀 Bot is running...")
+    # Start background checker in a separate thread
+    threading.Thread(target=background_checker, daemon=True).start()
+    while True:
+        try:
+            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        except Exception as e:
+            print("⚠️ Bot crashed, restarting in 5s:", e)
+            time.sleep(5)
 
 

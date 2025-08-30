@@ -189,5 +189,3 @@ def delete_coin(message):
 print("🚀 Bot is running...")
 bot.infinity_polling()
 
-
-

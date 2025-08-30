@@ -1,11 +1,15 @@
-Flask==2.3.3
+# Telegram bot
 pyTelegramBotAPI==4.12.0
-python-binance==1.0.16
-pandas==2.1.0
-numpy==1.26.4
-ta==0.10.2
-APScheduler==3.10.4
-gunicorn==20.1.0
+
+# Binance API
+python-binance==1.0.15
+
+# Data analysis
+pandas==2.0.3
+numpy==1.26.0
+
+# Technical analysis indicators
+ta==0.10.1
+
+# Optional: for HTTP requests if needed
 requests==2.31.0
-
-

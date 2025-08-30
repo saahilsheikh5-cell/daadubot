@@ -19,7 +19,12 @@ if not TELEGRAM_TOKEN or not BINANCE_API_KEY or not BINANCE_API_SECRET:
 
 # ==== INIT BOT AND BINANCE CLIENT ====
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-bot.remove_webhook()  # ✅ remove webhook to prevent 409
+# Force delete webhook on every start to prevent 409
+try:
+    bot.remove_webhook()
+except:
+    pass
+
 client = Client(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
 
 COINS_FILE = "my_coins.json"
@@ -31,9 +36,11 @@ def load_coins():
     with open(COINS_FILE, "r") as f:
         return json.load(f)
 
+
 def save_coins(coins):
     with open(COINS_FILE, "w") as f:
         json.dump(coins, f)
+
 
 def get_signal(symbol, interval="5m", lookback=100):
     try:
@@ -41,14 +48,24 @@ def get_signal(symbol, interval="5m", lookback=100):
         df = pd.DataFrame(
             klines,
             columns=[
-                "time","o","h","l","c","v","ct","qav","ntr","tbbav","tbqav","ignore"
+                "time",
+                "o",
+                "h",
+                "l",
+                "c",
+                "v",
+                "ct",
+                "qav",
+                "ntr",
+                "tbbav",
+                "tbqav",
+                "ignore",
             ],
         )
         df["c"] = df["c"].astype(float)
         df["h"] = df["h"].astype(float)
         df["l"] = df["l"].astype(float)
 
-        # ==== Indicators ====
         df["rsi"] = ta.momentum.RSIIndicator(df["c"], window=14).rsi()
         macd = ta.trend.MACD(df["c"])
         df["macd"] = macd.macd()
@@ -59,7 +76,7 @@ def get_signal(symbol, interval="5m", lookback=100):
         decision = "Neutral"
         explanation = []
 
-        # ==== STRONG SIGNAL CONDITIONS ====
+        # STRONG SIGNAL CONDITIONS
         if last["rsi"] < 30 and last["macd"] > last["macd_signal"] and last["c"] > last["ma50"]:
             decision = "✅ Strong BUY"
             explanation.append("RSI oversold + MACD bullish + Above MA50")
@@ -92,12 +109,14 @@ def main_menu():
     kb.add("📈 Signals", "➕ Add Coin", "➖ Remove Coin")
     return kb
 
+
 def signals_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("💼 My Coins", "🌍 All Coins")
     kb.add("🔎 Particular Coin", "🚀 Top Movers")
     kb.add("⬅️ Back")
     return kb
+
 
 # ==== HANDLERS ====
 @bot.message_handler(commands=["start"])
@@ -106,13 +125,16 @@ def start(message):
         message.chat.id, "🤖 Welcome to Ultra Signals Bot!", reply_markup=main_menu()
     )
 
+
 @bot.message_handler(func=lambda msg: msg.text == "⬅️ Back")
 def back_btn(message):
     bot.send_message(message.chat.id, "🔙 Main Menu", reply_markup=main_menu())
 
+
 @bot.message_handler(func=lambda msg: msg.text == "📈 Signals")
 def signals(message):
     bot.send_message(message.chat.id, "Choose a signal option:", reply_markup=signals_menu())
+
 
 @bot.message_handler(func=lambda msg: msg.text == "💼 My Coins")
 def my_coins(message):
@@ -124,22 +146,26 @@ def my_coins(message):
         txt = get_signal(c, "5m") + "\n" + get_signal(c, "1h") + "\n" + get_signal(c, "1d")
         bot.send_message(message.chat.id, txt)
 
+
 @bot.message_handler(func=lambda msg: msg.text == "🌍 All Coins")
 def all_coins(message):
     tickers = [s["symbol"] for s in client.get_all_tickers() if s["symbol"].endswith("USDT")]
-    for c in tickers[:10]:  # limit first 10 to avoid spam
+    for c in tickers[:10]:
         txt = get_signal(c, "5m")
         bot.send_message(message.chat.id, txt)
+
 
 @bot.message_handler(func=lambda msg: msg.text == "🔎 Particular Coin")
 def ask_coin(message):
     bot.send_message(message.chat.id, "Enter coin symbol (e.g., BTCUSDT):")
     bot.register_next_step_handler(message, particular_coin)
 
+
 def particular_coin(message):
     symbol = message.text.upper()
     txt = get_signal(symbol, "1m") + "\n" + get_signal(symbol, "5m") + "\n" + get_signal(symbol, "1h")
     bot.send_message(message.chat.id, txt)
+
 
 @bot.message_handler(func=lambda msg: msg.text == "🚀 Top Movers")
 def top_movers(message):
@@ -152,10 +178,12 @@ def top_movers(message):
         txt = get_signal(c, "5m")
         bot.send_message(message.chat.id, txt)
 
+
 @bot.message_handler(func=lambda msg: msg.text == "➕ Add Coin")
 def add_coin(message):
     bot.send_message(message.chat.id, "Enter coin symbol to add (e.g., BTCUSDT):")
     bot.register_next_step_handler(message, save_new_coin)
+
 
 def save_new_coin(message):
     symbol = message.text.upper()
@@ -167,10 +195,12 @@ def save_new_coin(message):
     else:
         bot.send_message(message.chat.id, "⚠️ Coin already in list.")
 
+
 @bot.message_handler(func=lambda msg: msg.text == "➖ Remove Coin")
 def remove_coin(message):
     bot.send_message(message.chat.id, "Enter coin symbol to remove (e.g., BTCUSDT):")
     bot.register_next_step_handler(message, delete_coin)
+
 
 def delete_coin(message):
     symbol = message.text.upper()
@@ -182,9 +212,14 @@ def delete_coin(message):
     else:
         bot.send_message(message.chat.id, "⚠️ Coin not found in list.")
 
-# ==== RUN BOT ====
+
+# ==== RUN BOT SAFELY ====
 print("🚀 Bot is running...")
-bot.infinity_polling()
+try:
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+except Exception as e:
+    print("❌ Fatal error in polling:", e)
+
 
 
 

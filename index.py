@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 from flask import Flask, request
 import telebot
@@ -7,25 +8,51 @@ from binance.client import Client
 import pandas as pd
 import ta
 
-# ==== ENVIRONMENT VARS ====
+# ==== ENVIRONMENT CHECK ====
+required_env_vars = ["TELEGRAM_TOKEN", "BINANCE_API_KEY", "BINANCE_API_SECRET", "PORT"]
+missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+if missing_vars:
+    print(f"❌ Missing environment variables: {', '.join(missing_vars)}")
+    sys.exit(1)
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 PORT = int(os.getenv("PORT", 5000))
+SERVICE_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render auto env variable
 
-if not TELEGRAM_TOKEN or not BINANCE_API_KEY or not BINANCE_API_SECRET:
-    raise RuntimeError("❌ Missing environment variables: TELEGRAM_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET")
+if not SERVICE_URL:
+    print("❌ RENDER_EXTERNAL_URL is not set. Webhook requires public URL.")
+    sys.exit(1)
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)  # webhook mode
+WEBHOOK_URL = f"{SERVICE_URL}/{TELEGRAM_TOKEN}"
 
+# ==== INIT BOT & BINANCE CLIENT ====
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Client(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+
+# ==== REMOVE OLD WEBHOOK & SET NEW ====
+bot.remove_webhook()
+bot.set_webhook(url=WEBHOOK_URL)
+print(f"✅ Webhook set: {WEBHOOK_URL}")
 
 # ==== FLASK APP ====
 app = Flask(__name__)
 
+@app.route("/")
+def home():
+    return "Bot is running."
+
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "!", 200
+
+# ==== COINS FILE ====
 COINS_FILE = "my_coins.json"
 
-# ==== HELPERS ====
 def load_coins():
     if not os.path.exists(COINS_FILE):
         return []
@@ -36,6 +63,7 @@ def save_coins(coins):
     with open(COINS_FILE, "w") as f:
         json.dump(coins, f)
 
+# ==== SIGNAL CALCULATION ====
 def get_signal(symbol, interval="5m", lookback=100):
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
@@ -81,7 +109,7 @@ Notes: {" | ".join(explanation) if explanation else "Mixed signals"}
     except Exception as e:
         return f"⚠️ Error fetching data for {symbol} {interval}: {e}"
 
-# ==== MENUS ====
+# ==== KEYBOARDS ====
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("📈 Signals", "➕ Add Coin", "➖ Remove Coin")
@@ -94,7 +122,7 @@ def signals_menu():
     kb.add("⬅️ Back")
     return kb
 
-# ==== BOT HANDLERS ====
+# ==== HANDLERS ====
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.send_message(message.chat.id, "🤖 Welcome to Ultra Signals Bot!", reply_markup=main_menu())
@@ -173,24 +201,10 @@ def delete_coin(message):
     else:
         bot.send_message(message.chat.id, "⚠️ Coin not found in list.")
 
-# ==== FLASK WEBHOOK ENDPOINT ====
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def webhook():
-    json_str = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "!", 200
-
-# ==== SET WEBHOOK ====
-WEBHOOK_URL = f"https://<your-app-name>.onrender.com/{TELEGRAM_TOKEN}"  # replace <your-app-name>
-bot.remove_webhook()
-bot.set_webhook(url=WEBHOOK_URL)
-print(f"🚀 Webhook set: {WEBHOOK_URL}")
-
-# ==== RUN FLASK ====
+# ==== RUN FLASK SERVER ====
 if __name__ == "__main__":
+    print("🚀 Bot is running via webhook...")
     app.run(host="0.0.0.0", port=PORT)
-
 
 
 

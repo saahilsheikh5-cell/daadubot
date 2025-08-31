@@ -1,8 +1,9 @@
-flask==3.0.3
-pyTelegramBotAPI==4.20.0
+Flask==2.3.2
+pyTelegramBotAPI==4.15.4
+python-binance==1.0.19
 pandas==2.2.2
 numpy==1.26.4
-python-binance==1.0.19
+
 
 
 

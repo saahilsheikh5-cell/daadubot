@@ -1,8 +1,6 @@
 import os
 import sys
 import json
-import threading
-from flask import Flask
 import telebot
 from telebot import types
 from binance.client import Client
@@ -10,7 +8,7 @@ import pandas as pd
 import ta
 
 # ==== ENVIRONMENT CHECK ====
-required_env_vars = ["TELEGRAM_TOKEN", "BINANCE_API_KEY", "BINANCE_API_SECRET", "PORT"]
+required_env_vars = ["TELEGRAM_TOKEN", "BINANCE_API_KEY", "BINANCE_API_SECRET"]
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 if missing_vars:
     print(f"❌ Missing environment variables: {', '.join(missing_vars)}")
@@ -19,7 +17,6 @@ if missing_vars:
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-PORT = int(os.getenv("PORT", 5000))
 
 # ==== INIT BOT & BINANCE CLIENT ====
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -28,18 +25,6 @@ client = Client(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
 # ==== REMOVE ANY EXISTING WEBHOOK ====
 bot.remove_webhook()
 print("✅ Webhook removed. Bot ready for polling.")
-
-# ==== FLASK SERVER TO BIND PORT ====
-app = Flask("")
-
-@app.route("/")
-def home():
-    return "Bot is running"
-
-def run_flask():
-    app.run(host="0.0.0.0", port=PORT)
-
-threading.Thread(target=run_flask).start()
 
 # ==== COINS FILE ====
 COINS_FILE = "my_coins.json"
@@ -193,7 +178,7 @@ def delete_coin(message):
         bot.send_message(message.chat.id, "⚠️ Coin not found in list.")
 
 # ==== RUN BOT ====
-print("🚀 Bot is running...")
+print("🚀 Bot is running with polling...")
 bot.infinity_polling()
 
 

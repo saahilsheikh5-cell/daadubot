@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import threading
-import time
 from flask import Flask, request
 import telebot
 from telebot import types
@@ -21,18 +20,18 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 PORT = int(os.getenv("PORT", 5000))
-WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}"
 
 # ==== INIT BOT & BINANCE CLIENT ====
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = Client(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
 
-# ==== REMOVE ANY EXISTING WEBHOOK & SET NEW ====
+# ==== REMOVE ANY EXISTING WEBHOOK ====
 bot.remove_webhook()
+WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}"
 bot.set_webhook(url=WEBHOOK_URL)
-print(f"✅ Webhook set: {WEBHOOK_URL}")
+print(f"🚀 Webhook set: {WEBHOOK_URL}")
 
-# ==== FLASK SERVER TO BIND PORT ====
+# ==== FLASK SERVER ====
 app = Flask(__name__)
 
 @app.route("/")
@@ -44,12 +43,11 @@ def webhook():
     json_str = request.get_data().decode("utf-8")
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return "!", 200
+    return "ok", 200
 
 # ==== COINS FILE ====
 COINS_FILE = "my_coins.json"
 
-# ==== HELPERS ====
 def load_coins():
     if not os.path.exists(COINS_FILE):
         return []
@@ -60,6 +58,7 @@ def save_coins(coins):
     with open(COINS_FILE, "w") as f:
         json.dump(coins, f)
 
+# ==== SIGNAL CALCULATION ====
 def get_signal(symbol, interval="5m", lookback=100):
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
@@ -77,15 +76,18 @@ def get_signal(symbol, interval="5m", lookback=100):
         df["ma50"] = df["c"].rolling(50).mean()
         last = df.iloc[-1]
 
-        decision = "Neutral"
-        explanation = []
+        # ==== TREND SCORING ====
+        trend_score = 0
+        trend_score += 1 if last["rsi"] < 30 else -1 if last["rsi"] > 70 else 0
+        trend_score += 1 if last["macd"] > last["macd_signal"] else -1
+        trend_score += 1 if last["c"] > last["ma50"] else -1
 
-        if last["rsi"] < 30 and last["macd"] > last["macd_signal"] and last["c"] > last["ma50"]:
-            decision = "✅ Ultra BUY"
-            explanation.append("RSI oversold + MACD bullish + Above MA50")
-        elif last["rsi"] > 70 and last["macd"] < last["macd_signal"] and last["c"] < last["ma50"]:
-            decision = "❌ Ultra SELL"
-            explanation.append("RSI overbought + MACD bearish + Below MA50")
+        if trend_score >= 2:
+            decision = "✅ Strong BUY"
+        elif trend_score <= -2:
+            decision = "❌ Strong SELL"
+        else:
+            decision = "🔄 Neutral / Mixed"
 
         signal_text = f"""
 📊 Signal for {symbol} [{interval}]
@@ -99,7 +101,6 @@ TP1: {round(last['c']*1.01,4)}
 TP2: {round(last['c']*1.02,4)}
 SL: {round(last['c']*0.99,4)}
 Suggested Leverage: x10
-Notes: {" | ".join(explanation) if explanation else "Mixed signals"}
         """
         return signal_text
     except Exception as e:
@@ -138,7 +139,7 @@ def my_coins(message):
         bot.send_message(message.chat.id, "❌ No coins added yet. Use ➕ Add Coin.")
         return
     for c in coins:
-        txt = get_signal(c, "5m") + "\n" + get_signal(c, "1h") + "\n" + get_signal(c, "1d")
+        txt = "\n\n".join([get_signal(c, tf) for tf in ["5m","1h","1d"]])
         bot.send_message(message.chat.id, txt)
 
 @bot.message_handler(func=lambda msg: msg.text == "🌍 All Coins")
@@ -155,13 +156,13 @@ def ask_coin(message):
 
 def particular_coin(message):
     symbol = message.text.upper()
-    txt = get_signal(symbol, "5m") + "\n" + get_signal(symbol, "1h") + "\n" + get_signal(symbol, "1d")
+    txt = "\n\n".join([get_signal(symbol, tf) for tf in ["5m","1h","1d"]])
     bot.send_message(message.chat.id, txt)
 
 @bot.message_handler(func=lambda msg: msg.text == "🚀 Top Movers")
 def top_movers(message):
     tickers = client.get_ticker_24hr()
-    sorted_tickers = sorted(tickers, key=lambda x: float(x["priceChangePercent"]), reverse=True)
+    sorted_tickers = sorted(tickers, key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)
     top = [t["symbol"] for t in sorted_tickers if t["symbol"].endswith("USDT")][:5]
     for c in top:
         txt = get_signal(c, "5m")
@@ -197,35 +198,10 @@ def delete_coin(message):
     else:
         bot.send_message(message.chat.id, "⚠️ Coin not found in list.")
 
-# ==== REAL-TIME TOP MOVER ALERTS ====
-last_top = []
+# ==== RUN FLASK SERVER ====
+threading.Thread(target=lambda: app.run(host="0.0.0.0", port=PORT)).start()
+print("🚀 Bot is running via webhook...")
 
-def mover_alerts():
-    global last_top
-    while True:
-        try:
-            tickers = client.get_ticker_24hr()
-            sorted_tickers = sorted(tickers, key=lambda x: float(x["priceChangePercent"]), reverse=True)
-            top = [t["symbol"] for t in sorted_tickers if t["symbol"].endswith("USDT")][:5]
-            if top != last_top:
-                msg = "🚀 Top Movers Update:\n" + "\n".join(top)
-                for user in load_coins():  # optional: alert all users with coins
-                    try:
-                        bot.send_message(user, msg)
-                    except:
-                        pass
-                last_top = top
-            time.sleep(60)
-        except Exception as e:
-            print("⚠️ Mover alert error:", e)
-            time.sleep(60)
-
-threading.Thread(target=mover_alerts, daemon=True).start()
-
-# ==== RUN FLASK APP ====
-if __name__ == "__main__":
-    print("🚀 Bot running with webhook...")
-    app.run(host="0.0.0.0", port=PORT)
 
 
 

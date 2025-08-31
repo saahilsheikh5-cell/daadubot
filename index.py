@@ -1,231 +1,187 @@
 import os
-import threading
 import time
-import pandas as pd
-import numpy as np
+import threading
 from flask import Flask, request
 import telebot
 from telebot import types
 from binance.client import Client
-from binance.exceptions import BinanceAPIException
 
-# --- ENV VARIABLES ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", 0))
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
-BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # optional
+# === ENVIRONMENT VARIABLES ===
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
-client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+client = Client(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
 
-# --- GLOBALS ---
-my_coins = []
-top100_list = []
-auto_signal_flag = False
-top_movers_auto = False
+# === STATE STORAGE ===
+user_coins = {}
+auto_signals_running = {}
+top_movers_running = {}
+selected_timeframe = {}
 
-# --- FETCH TOP 100 BINANCE COINS ---
-def fetch_top100():
-    global top100_list
-    try:
-        tickers = client.get_ticker()
-        df = pd.DataFrame(tickers)
-        df['quoteVolume'] = df['quoteVolume'].astype(float)
-        df = df.sort_values('quoteVolume', ascending=False)
-        top100_list = df['symbol'].tolist()[:100]
-    except Exception as e:
-        print(f"Error fetching top100: {e}")
+# === UTILITIES ===
+def get_signal(symbol, timeframe="5m"):
+    """Mock signal generator (replace with real TA logic)."""
+    import random
+    outcome = random.choice(["BUY", "SELL", "NEUTRAL"])
+    if outcome == "NEUTRAL":
+        return None
+    return {
+        "symbol": symbol,
+        "action": outcome,
+        "timeframe": timeframe,
+        "leverage": random.choice([5, 10, 20]),
+        "entry": round(random.uniform(1, 100), 3),
+        "sl": round(random.uniform(1, 100), 3),
+        "tp1": round(random.uniform(1, 100), 3),
+        "tp2": round(random.uniform(1, 100), 3),
+        "valid_for": 15  # minutes
+    }
 
-# --- SIGNAL CALCULATION ---
-def calculate_signal(symbol, interval):
-    try:
-        price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-        decision = np.random.choice(['✅ Strong BUY','❌ Strong SELL'])  # Replace with real logic
-        tp_adjust = 1.01 if 'BUY' in decision else 0.99
-        RSI = round(np.random.uniform(30,70),2)
-        MACD = (round(np.random.uniform(-1,1),4), round(np.random.uniform(-1,1),4))
-        summary = generate_summary(decision, RSI, MACD)
-        signal_data = {
-            'decision': decision,
-            'RSI': RSI,
-            'MACD': MACD,
-            'Price': price,
-            'Entry': price,
-            'TP1': round(price*tp_adjust,4),
-            'TP2': round(price*tp_adjust**2,4),
-            'SL': round(price*0.99 if 'BUY' in decision else price*1.01,4),
-            'Leverage': 'x10',
-            'valid_for': interval_to_minutes(interval),
-            'notes': 'Ultra signal based on multiple indices',
-            'summary': summary
-        }
-        return signal_data
-    except BinanceAPIException as e:
-        return {'error': str(e)}
+def format_signal(sig):
+    return (
+        f"{'✅ BUY' if sig['action']=='BUY' else '❌ SELL'} {sig['symbol']} ({sig['timeframe']})\n"
+        f"Leverage: x{sig['leverage']}\n"
+        f"Entry: {sig['entry']}\n"
+        f"Stop Loss: {sig['sl']}\n"
+        f"TP1: {sig['tp1']} | TP2: {sig['tp2']}\n"
+        f"Valid for: {sig['valid_for']} mins"
+    )
 
-def interval_to_minutes(interval):
-    mapping = {'1m':1,'5m':5,'15m':15,'1h':60,'1d':1440}
-    return mapping.get(interval,5)
-
-def generate_summary(decision, RSI, MACD):
-    trend = "Bullish" if 'BUY' in decision else "Bearish"
-    strength = "strong momentum" if abs(MACD[0]-MACD[1])>0.1 else "moderate momentum"
-    rsi_note = "overbought" if RSI>70 else "oversold" if RSI<30 else "neutral"
-    return f"{trend} trend with {strength}, RSI indicates {rsi_note}."
-
-# --- FORMAT SIGNAL ---
-def format_signal_msg(symbol, interval, signal):
-    return f"""📊 Signal for {symbol} [{interval}]
-Decision: {signal['decision']}
-RSI: {signal['RSI']}
-MACD: {signal['MACD'][0]} / Signal: {signal['MACD'][1]}
-Price: {signal['Price']}
-
-Entry: {signal['Entry']}
-TP1: {signal['TP1']}
-TP2: {signal['TP2']}
-SL: {signal['SL']}
-Suggested Leverage: {signal['Leverage']}
-Signal valid for: {signal['valid_for']} mins
-Notes: {signal['notes']}
-Summary: {signal['summary']}"""
-
-# --- MANUAL SIGNALS ---
-def send_manual_signals(symbols, interval):
-    for sym in symbols:
-        signal = calculate_signal(sym, interval)
-        if 'error' in signal:
-            bot.send_message(TELEGRAM_CHAT_ID, f"⚠️ Error fetching data for {sym} [{interval}]: {signal['error']}")
-            continue
-        if 'Neutral' in signal['decision']:
-            continue
-        msg = format_signal_msg(sym, interval, signal)
-        bot.send_message(TELEGRAM_CHAT_ID, msg)
-
-# --- AUTO SIGNAL LOOP ---
-def auto_signal_loop(interval):
-    global auto_signal_flag
-    while auto_signal_flag:
-        fetch_top100()
-        send_manual_signals(top100_list, interval)
-        time.sleep(interval_to_minutes(interval)*60)
-
-# --- TOP MOVERS LOOP ---
-def top_movers_loop():
-    global top_movers_auto
-    while top_movers_auto:
-        try:
-            tickers = client.get_ticker()
-            df = pd.DataFrame(tickers)
-            df['priceChangePercent'] = df['priceChangePercent'].astype(float)
-            top = df.sort_values('priceChangePercent', ascending=False).head(10)
-            for idx, row in top.iterrows():
-                if abs(row['priceChangePercent']) >= 5:
-                    direction = "🚀 Up" if row['priceChangePercent'] > 0 else "❌ Down"
-                    msg = f"{direction} {row['symbol']}: {row['priceChangePercent']:.2f}% change"
-                    bot.send_message(TELEGRAM_CHAT_ID, msg)
-            time.sleep(60)
-        except Exception as e:
-            print(f"Top Movers Auto Error: {e}")
-            time.sleep(30)
-
-# --- TELEGRAM COMMANDS ---
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
+# === MAIN MENU ===
+def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("➕ Add Coin", "📈 Signals")
-    markup.row("🚀 Top Movers", "🔎 Particular Coin")
-    markup.row("🕑 Auto Signals Start", "⏹ Stop Auto Signals")
-    markup.row("🚀 Top Movers Auto", "⏹ Stop Top Movers Auto")
-    bot.send_message(message.chat.id, "🤖 Welcome to Ultra Signals Bot!", reply_markup=markup)
+    markup.add("➕ Add Coin", "📈 Signals")
+    markup.add("🚀 Top Movers Auto", "⏹ Stop Top Movers Auto")
+    markup.add("🕑 Auto Signals Start", "⏹ Stop Auto Signals")
+    return markup
 
-@bot.message_handler(func=lambda m: m.text=="➕ Add Coin")
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(message.chat.id, "🤖 Welcome to Ultra Signals Bot!", reply_markup=main_menu())
+
+# === ADD COIN ===
+@bot.message_handler(func=lambda msg: msg.text == "➕ Add Coin")
 def add_coin(message):
-    msg = bot.send_message(message.chat.id, "Enter coin symbol to add (e.g., BTCUSDT):")
-    bot.register_next_step_handler(msg, save_coin)
+    bot.send_message(message.chat.id, "Enter coin symbol to add (e.g., BTCUSDT):")
+    bot.register_next_step_handler(message, save_coin)
 
 def save_coin(message):
-    coin = message.text.upper()
-    if coin not in my_coins:
-        my_coins.append(coin)
-        bot.send_message(message.chat.id, f"✅ {coin} added to My Coins.")
+    symbol = message.text.strip().upper()
+    user_coins.setdefault(message.chat.id, [])
+    if symbol not in user_coins[message.chat.id]:
+        user_coins[message.chat.id].append(symbol)
+        bot.send_message(message.chat.id, f"✅ {symbol} added to My Coins.")
     else:
-        bot.send_message(message.chat.id, f"⚠️ {coin} already in My Coins.")
+        bot.send_message(message.chat.id, f"⚠️ {symbol} already in My Coins.")
 
-@bot.message_handler(func=lambda m: m.text=="📈 Signals")
+# === SIGNALS MENU ===
+@bot.message_handler(func=lambda msg: msg.text == "📈 Signals")
 def signals_menu(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("💼 My Coins", "🌍 All Coins")
-    markup.row("1m","5m","15m","1h","1d")
-    markup.row("🔎 Particular Coin")
+    markup.add("💼 My Coins", "🌍 All Coins", "🔎 Particular Coin")
+    markup.add("⬅️ Back")
     bot.send_message(message.chat.id, "Choose a signal option:", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: m.text in ["💼 My Coins","🌍 All Coins"])
-def handle_manual_signal(message):
-    interval_msg = bot.send_message(message.chat.id, "Choose timeframe: 1m,5m,15m,1h,1d")
-    bot.register_next_step_handler(interval_msg, manual_signal_process, message.text)
+@bot.message_handler(func=lambda msg: msg.text in ["💼 My Coins", "🌍 All Coins", "🔎 Particular Coin"])
+def signal_timeframe(message):
+    markup = types.InlineKeyboardMarkup()
+    for tf in ["1m", "5m", "15m", "1h", "1d"]:
+        markup.add(types.InlineKeyboardButton(tf, callback_data=f"tf|{message.text}|{tf}"))
+    markup.add(types.InlineKeyboardButton("⬅️ Back", callback_data="back_main"))
+    bot.send_message(message.chat.id, "Choose timeframe:", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: m.text=="🔎 Particular Coin")
-def particular_coin(message):
-    msg = bot.send_message(message.chat.id, "Enter coin symbol (e.g., BTCUSDT):")
-    bot.register_next_step_handler(msg, particular_coin_timeframe)
+# === CALLBACK HANDLER ===
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    if call.data.startswith("tf|"):
+        _, source, tf = call.data.split("|")
+        chat_id = call.message.chat.id
+        if source == "💼 My Coins":
+            coins = user_coins.get(chat_id, [])
+        elif source == "🌍 All Coins":
+            coins = [s["symbol"] for s in client.get_ticker() if s["symbol"].endswith("USDT")][:100]
+        else:
+            bot.send_message(chat_id, "Enter coin symbol (e.g., BTCUSDT):")
+            return
+        for sym in coins:
+            sig = get_signal(sym, tf)
+            if sig:
+                bot.send_message(chat_id, format_signal(sig))
+    elif call.data == "back_main":
+        bot.send_message(call.message.chat.id, "🔙 Main Menu", reply_markup=main_menu())
 
-def particular_coin_timeframe(message):
-    symbol = message.text.upper()
-    msg = bot.send_message(message.chat.id, "Enter timeframe: 1m,5m,15m,1h,1d")
-    bot.register_next_step_handler(msg, particular_coin_signal, symbol)
+# === AUTO SIGNALS ===
+def auto_signal_worker(chat_id, timeframe):
+    while auto_signals_running.get(chat_id):
+        coins = [s["symbol"] for s in client.get_ticker() if s["symbol"].endswith("USDT")][:100]
+        for sym in coins:
+            sig = get_signal(sym, timeframe)
+            if sig:
+                bot.send_message(chat_id, format_signal(sig))
+        time.sleep(60)
 
-def particular_coin_signal(msg, symbol):
-    interval = msg.text
-    send_manual_signals([symbol], interval)
-
-@bot.message_handler(func=lambda m: m.text=="🕑 Auto Signals Start")
+@bot.message_handler(func=lambda msg: msg.text == "🕑 Auto Signals Start")
 def start_auto_signals(message):
-    global auto_signal_flag
-    if not auto_signal_flag:
-        auto_signal_flag = True
-        interval_msg = bot.send_message(message.chat.id, "Select timeframe for Auto Signals: 1m,5m,15m,1h,1d")
-        bot.register_next_step_handler(interval_msg, start_auto_loop)
+    markup = types.InlineKeyboardMarkup()
+    for tf in ["1m", "5m", "15m", "1h", "1d"]:
+        markup.add(types.InlineKeyboardButton(tf, callback_data=f"auto|{tf}"))
+    bot.send_message(message.chat.id, "Select timeframe for Auto Signals:", reply_markup=markup)
 
-def start_auto_loop(msg):
-    interval = msg.text
-    threading.Thread(target=auto_signal_loop, args=(interval,), daemon=True).start()
-    bot.send_message(TELEGRAM_CHAT_ID, f"✅ Auto Signals started every {interval}.")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("auto|"))
+def start_auto_with_tf(call):
+    _, tf = call.data.split("|")
+    chat_id = call.message.chat.id
+    auto_signals_running[chat_id] = True
+    threading.Thread(target=auto_signal_worker, args=(chat_id, tf), daemon=True).start()
+    bot.send_message(chat_id, f"✅ Auto signals started for {tf}.")
 
-@bot.message_handler(func=lambda m: m.text=="⏹ Stop Auto Signals")
+@bot.message_handler(func=lambda msg: msg.text == "⏹ Stop Auto Signals")
 def stop_auto_signals(message):
-    global auto_signal_flag
-    auto_signal_flag = False
+    auto_signals_running[message.chat.id] = False
     bot.send_message(message.chat.id, "⏹ Auto signals stopped.")
 
-@bot.message_handler(func=lambda m: m.text=="🚀 Top Movers Auto")
-def start_top_movers(message):
-    global top_movers_auto
-    if not top_movers_auto:
-        top_movers_auto = True
-        threading.Thread(target=top_movers_loop, daemon=True).start()
-        bot.send_message(message.chat.id, "✅ Top Movers Auto started (24x7).")
+# === TOP MOVERS ===
+def top_movers_worker(chat_id):
+    while top_movers_running.get(chat_id):
+        movers = sorted(client.get_ticker(), key=lambda x: abs(float(x["priceChangePercent"])), reverse=True)[:5]
+        txt = "🚀 Top Movers:\n" + "\n".join([f"{m['symbol']}: {m['priceChangePercent']}%" for m in movers])
+        bot.send_message(chat_id, txt)
+        time.sleep(120)
 
-@bot.message_handler(func=lambda m: m.text=="⏹ Stop Top Movers Auto")
+@bot.message_handler(func=lambda msg: msg.text == "🚀 Top Movers Auto")
+def start_top_movers(message):
+    top_movers_running[message.chat.id] = True
+    threading.Thread(target=top_movers_worker, args=(message.chat.id,), daemon=True).start()
+    bot.send_message(message.chat.id, "🚀 Top Movers monitor started.")
+
+@bot.message_handler(func=lambda msg: msg.text == "⏹ Stop Top Movers Auto")
 def stop_top_movers(message):
-    global top_movers_auto
-    top_movers_auto = False
+    top_movers_running[message.chat.id] = False
     bot.send_message(message.chat.id, "⏹ Top Movers Auto stopped.")
 
-# --- FLASK WEBHOOK ---
-@app.route(f"/{TELEGRAM_TOKEN}", methods=['POST'])
+# === BACK HANDLER ===
+@bot.message_handler(func=lambda msg: msg.text == "⬅️ Back")
+def back_to_main(message):
+    bot.send_message(message.chat.id, "🔙 Main Menu", reply_markup=main_menu())
+
+# === FLASK WEBHOOK ===
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    json_str = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "!", 200
+    update = request.stream.read().decode("utf-8")
+    bot.process_new_updates([telebot.types.Update.de_json(update)])
+    return "OK", 200
 
 if __name__ == "__main__":
-    fetch_top100()
     bot.remove_webhook()
-    bot.infinity_polling()
+    time.sleep(1)
+    bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
 
 
 

@@ -1,5 +1,6 @@
-Flask==2.3.4
+Flask==2.3.3
 gunicorn==21.2.0
+Werkzeug==2.3.7
 pyTelegramBotAPI==4.11.0
 pandas==2.1.1
 numpy==1.26.2
